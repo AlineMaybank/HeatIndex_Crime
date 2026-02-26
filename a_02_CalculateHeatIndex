@@ -1,0 +1,1488 @@
+---
+title: "a_02_CalculateHeatIndex"
+author: "Aline Maybank"
+date: "2026-02-09"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Setting Up
+The purpose of this script is to calculate the Heat Index for Baltimore and DC daily for the study period. The method used to calculate the heat index was created by: https://ehp.niehs.nih.gov/doi/10.1289/ehp.1206273; and found https://cran.r-project.org/web/packages/weathermetrics/index.html
+
+## Load Packages
+```{r, results='hide', message=FALSE, warning=FALSE}
+library(dplyr)
+library(tidyr)
+library(lubridate)
+library(ggplot2)
+library(riem)
+library(weathermetrics)
+library(MASS)
+library(emmeans)
+library(broom)
+library(readr)
+library(knitr)
+library(kableExtra)
+library(splines)
+library(sf)
+library(tigris)
+library(patchwork)
+library(cowplot)
+library(stringr)
+```
+
+## Load Crime Data
+```{r}
+# Baltimore crime data from 2020-2024
+Baltimore_allcrimes_2020_clean_flat <- read.csv("Crime_Data/2025-10-07_Baltimore_allcrimes_2020_clean_flat.csv")
+Baltimore_allcrimes_2021_clean_flat <- read.csv("Crime_Data/2025-10-07_Baltimore_allcrimes_2021_clean_flat.csv")
+Baltimore_allcrimes_2022_clean_flat <- read.csv("Crime_Data/2025-10-07_Baltimore_allcrimes_2022_clean_flat.csv")
+Baltimore_allcrimes_2023_clean_flat <- read.csv("Crime_Data/2025-10-07_Baltimore_allcrimes_2023_clean_flat.csv")
+Baltimore_allcrimes_2024_clean_flat <- read.csv("Crime_Data/2025-10-07_Baltimore_allcrimes_2024_clean_flat.csv")
+
+# DC crime data from 2020-2024
+DC_allcrimes_2020_clean_flat <- read.csv("Crime_Data/2025-10-07_DC_allcrimes_2020_clean_flat.csv")
+DC_allcrimes_2021_clean_flat <- read.csv("Crime_Data/2025-10-07_DC_allcrimes_2021_clean_flat.csv")
+DC_allcrimes_2022_clean_flat <- read.csv("Crime_Data/2025-10-07_DC_allcrimes_2022_clean_flat.csv")
+DC_allcrimes_2023_clean_flat <- read.csv("Crime_Data/2025-10-07_DC_allcrimes_2023_clean_flat.csv")
+DC_allcrimes_2024_clean_flat <- read.csv("Crime_Data/2025-10-07_DC_allcrimes_2024_clean_flat.csv")
+```
+
+# Part 1: Heat Index Calculation
+
+## Retrieve Heat Index Data
+
+Retrieve hourly ASOS data (2020–2024)
+```{r}
+date_start <- "2020-01-01"
+date_end   <- "2025-01-01"
+tz_local   <- "America/New_York"
+
+# Fetch hourly ASOS
+# DC: station = KDCA (Reagan National)
+# Baltimore: station = KBWI (BWI)
+dc_hr_raw <- riem_measures(station = "KDCA", date_start = date_start, date_end = date_end)
+bal_hr_raw <- riem_measures(station = "KBWI", date_start = date_start, date_end = date_end)
+```
+
+## Clean ASOS Data
+```{r}
+# Function to clean and recover relative humidity
+clean_asos <- function(df, tz_local) {
+  df %>%
+    dplyr::transmute(
+      datetime_local = lubridate::with_tz(as.POSIXct(.data$valid, tz = "UTC"), tzone = tz_local),
+      date  = as.Date(datetime_local),
+      tmpf  = suppressWarnings(as.numeric(.data$tmpf)),
+      relh  = suppressWarnings(as.numeric(.data$relh)),
+      dwpf  = suppressWarnings(as.numeric(.data$dwpf))
+    ) %>%
+    dplyr::mutate(
+      rh_from_dp = dplyr::if_else(
+        is.na(relh) & !is.na(tmpf) & !is.na(dwpf),
+        weathermetrics::dewpoint.to.humidity(
+          dp = dwpf, t = tmpf, temperature.metric = "fahrenheit"
+        ),
+        NA_real_
+      ),
+      relh = dplyr::coalesce(relh, rh_from_dp),
+      relh = pmax(pmin(relh, 100), 0),
+      tmpf = dplyr::if_else(tmpf < -80 | tmpf > 150, NA_real_, tmpf)
+    ) %>%
+    dplyr::select(datetime_local, date, tmpf, relh)
+}
+
+dc_hr  <- clean_asos(dc_hr_raw,  tz_local)
+bal_hr <- clean_asos(bal_hr_raw, tz_local)
+
+```
+
+## Compute Daily Heat Index
+```{r}
+# Vectorized Heat Index calculator
+hi_vec <- function(temp_f, rh_pct) {
+  suppressWarnings(weathermetrics::heat.index(
+    t = temp_f,
+    rh = rh_pct,
+    temperature.metric = "fahrenheit",
+    output.metric      = "fahrenheit",
+    round = 1
+  ))
+}
+
+# DC daily heat index (from hourly)
+dc_daily_hi <- dc_hr %>%
+  dplyr::mutate(hi_f = hi_vec(tmpf, relh)) %>%
+  dplyr::group_by(date) %>%
+  dplyr::summarise(
+    hi_mean_f = if (all(is.na(hi_f))) NA_real_ else mean(hi_f, na.rm = TRUE),
+    hi_max_f  = if (all(is.na(hi_f))) NA_real_ else max(hi_f,  na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  dplyr::filter(date <= as.Date("2024-12-31")) %>%  # ADD THIS LINE
+  dplyr::mutate(city = "DC")
+
+# Baltimore daily heat index (from hourly)
+bal_daily_hi <- bal_hr %>%
+  dplyr::mutate(hi_f = hi_vec(tmpf, relh)) %>%
+  dplyr::group_by(date) %>%
+  dplyr::summarise(
+    hi_mean_f = if (all(is.na(hi_f))) NA_real_ else mean(hi_f, na.rm = TRUE),
+    hi_max_f  = if (all(is.na(hi_f))) NA_real_ else max(hi_f,  na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  dplyr::filter(date <= as.Date("2024-12-31")) %>%  # ADD THIS LINE
+  dplyr::mutate(city = "Baltimore")
+
+# Combine for analysis
+daily_hi_all <- dplyr::bind_rows(dc_daily_hi, bal_daily_hi) %>%
+  dplyr::select(city, date, hi_mean_f, hi_max_f)
+
+```
+
+## Verify Heat Index Calculation
+```{r}
+summary(dc_daily_hi$hi_max_f)
+summary(bal_daily_hi$hi_max_f)
+
+# Coverage check
+seq_dates <- seq(as.Date("2020-01-01"), as.Date("2024-12-31"), by = "day")
+cat("Missing DC dates:", sum(!(seq_dates %in% dc_daily_hi$date)), "\n")
+cat("Missing Baltimore dates:", sum(!(seq_dates %in% bal_daily_hi$date)), "\n")
+```
+For future reference, 2024 was a leap year.
+
+## Export Heat Index Data
+```{r}
+out_dir <- "outputs/heat_index"
+dir.create(out_dir, recursive = TRUE, showWarnings = FALSE)
+
+# Export various formats
+readr::write_csv(daily_hi_all, file.path(out_dir, "daily_hi_wide_f.csv"))
+readr::write_csv(
+  dplyr::filter(daily_hi_all, city == "DC"),
+  file.path(out_dir, "daily_hi_DC_f.csv")
+)
+readr::write_csv(
+  dplyr::filter(daily_hi_all, city == "Baltimore"),
+  file.path(out_dir, "daily_hi_Baltimore_f.csv")
+)
+```
+
+## Calculate HI Percentile Thresholds
+```{r}
+# Calculate 85th and 95th percentile thresholds by city
+hi_thresholds_hw <- daily_hi_all %>%
+  dplyr::group_by(city) %>%
+  dplyr::summarise(
+    p85 = quantile(hi_max_f, 0.85, na.rm = TRUE),
+    p95 = quantile(hi_max_f, 0.95, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+hi_thresholds_hw %>%
+  dplyr::mutate(
+    p85 = round(p85, 1),
+    p95 = round(p95, 1)
+  ) %>%
+  knitr::kable(
+    format = "html",
+    col.names = c("City", "85th Percentile (Max HI °F)", "95th Percentile (Max HI °F)"),
+    caption = "Heat Index Thresholds (Daily Max HI)"
+  ) %>%
+  kableExtra::kable_styling(
+    bootstrap_options = c("striped", "condensed"),
+    full_width = FALSE
+  )
+```
+
+## Visualize Heat Index Distribution
+```{r}
+# Percentile thresholds for plotting (by city)
+hi_thresh <- daily_hi_all %>%
+  dplyr::group_by(city) %>%
+  dplyr::summarise(
+    p85_max  = stats::quantile(hi_max_f,  0.85, na.rm = TRUE),
+    p95_max  = stats::quantile(hi_max_f,  0.95, na.rm = TRUE),
+    p85_mean = stats::quantile(hi_mean_f, 0.85, na.rm = TRUE),
+    p95_mean = stats::quantile(hi_mean_f, 0.95, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+# Long format for plotting (keep all cities; drop NA hi_f)
+hi_long <- daily_hi_all %>%
+  tidyr::pivot_longer(
+    cols = c(hi_max_f, hi_mean_f),
+    names_to = "metric",
+    values_to = "hi_f"
+  ) %>%
+  dplyr::mutate(
+    metric = dplyr::recode(metric,
+      hi_max_f  = "Daily Max HI (°F)",
+      hi_mean_f = "Daily Mean HI (°F)"
+    )
+  ) %>%
+  dplyr::filter(!is.na(hi_f))
+
+# Plot function
+plot_hi_density <- function(df_metric_label) {
+
+  th_cols <- if (df_metric_label == "Daily Max HI (°F)") {
+    c("p85_max", "p95_max")
+  } else {
+    c("p85_mean", "p95_mean")
+  }
+
+  tdf <- hi_thresh %>%
+    dplyr::select(
+      city,
+      p85 = dplyr::all_of(th_cols[1]),
+      p95 = dplyr::all_of(th_cols[2])
+    )
+
+  dat <- hi_long %>%
+    dplyr::filter(metric == df_metric_label) %>%
+    dplyr::left_join(tdf, by = "city")
+
+  x_min <- floor(min(dat$hi_f, na.rm = TRUE) / 5) * 5
+  x_max <- ceiling(max(dat$hi_f, na.rm = TRUE) / 5) * 5
+  breaks_5 <- seq(x_min, x_max, by = 5)
+
+  ggplot2::ggplot(dat, ggplot2::aes(x = hi_f)) +
+    ggplot2::geom_histogram(ggplot2::aes(y = ggplot2::after_stat(density)),
+                            bins = 40, alpha = 0.25) +
+    ggplot2::geom_density(linewidth = 1) +
+    ggplot2::geom_vline(ggplot2::aes(xintercept = p85), linetype = 2) +
+    ggplot2::geom_vline(ggplot2::aes(xintercept = p95), linetype = 2) +
+    ggplot2::facet_wrap(~ city, ncol = 1, scales = "free_y") +
+    ggplot2::scale_x_continuous(
+      breaks = breaks_5,
+      labels = function(x) sprintf("%.0f°", x)
+    ) +
+    ggplot2::labs(
+      title = paste0("Distribution of ", df_metric_label, " with 85th/95th Percentiles"),
+      x = df_metric_label, y = "Density"
+    ) +
+    ggplot2::theme_minimal(base_size = 12) +
+    ggplot2::theme(panel.grid = ggplot2::element_blank())
+}
+
+print(plot_hi_density("Daily Max HI (°F)"))
+print(plot_hi_density("Daily Mean HI (°F)"))
+```
+
+# Part 2: Crime Data Preparation
+
+## Normalize and Combine Crime Data
+```{r}
+# Normalization function
+normalize_for_bind <- function(df, date_col, city_name, offense_col) {
+  df %>%
+    dplyr::mutate(
+      city       = city_name,
+      crime_date = as.Date(.data[[date_col]]),
+      offense_cat = as.character(.data[[offense_col]]) |> trimws()
+    ) %>%
+    # drop conflicting mixed-type column if it exists
+    dplyr::select(-dplyr::any_of("Post"))
+}
+
+# Combine all crime data
+crime_all <- dplyr::bind_rows(
+  normalize_for_bind(DC_allcrimes_2020_clean_flat, "START_DATE", "DC", "OFFENSE"),
+  normalize_for_bind(DC_allcrimes_2021_clean_flat, "START_DATE", "DC", "OFFENSE"),
+  normalize_for_bind(DC_allcrimes_2022_clean_flat, "START_DATE", "DC", "OFFENSE"),
+  normalize_for_bind(DC_allcrimes_2023_clean_flat, "START_DATE", "DC", "OFFENSE"),
+  normalize_for_bind(DC_allcrimes_2024_clean_flat, "START_DATE", "DC", "OFFENSE"),
+  normalize_for_bind(Baltimore_allcrimes_2020_clean_flat, "CrimeDateT", "Baltimore", "Descriptio"),
+  normalize_for_bind(Baltimore_allcrimes_2021_clean_flat, "CrimeDateT", "Baltimore", "Descriptio"),
+  normalize_for_bind(Baltimore_allcrimes_2022_clean_flat, "CrimeDateT", "Baltimore", "Descriptio"),
+  normalize_for_bind(Baltimore_allcrimes_2023_clean_flat, "CrimeDateT", "Baltimore", "Descriptio"),
+  normalize_for_bind(Baltimore_allcrimes_2024_clean_flat, "CrimeDateT", "Baltimore", "Descriptio")
+)
+
+# Define violent categories
+violent_baltimore <- c(
+  "AGG. ASSAULT",
+  "HOMICIDE",
+  "RAPE",
+  "ROBBERY",
+  "ROBBERY - CARJACKING",
+  "ROBBERY - COMMERCIAL",
+  "SHOOTING"
+)
+
+violent_dc <- c(
+  "ASSAULT W/DANGEROUS WEAPON",
+  "HOMICIDE",
+  "ROBBERY",
+  "SEX ABUSE"
+)
+
+crime_all <- crime_all %>%
+  dplyr::mutate(
+    offense_std = stringr::str_to_upper(stringr::str_squish(as.character(offense_cat))),
+    crime_type = dplyr::case_when(
+      city == "Baltimore" & offense_std %in% violent_baltimore ~ "VIOLENT",
+      city == "Baltimore"                                     ~ "NONVIOLENT",
+      city == "DC"        & offense_std %in% violent_dc        ~ "VIOLENT",
+      city == "DC"                                             ~ "NONVIOLENT",
+      TRUE                                                     ~ NA_character_
+    )
+  )
+```
+
+
+## Create Daily Crime Counts
+```{r}
+# Build daily panel (crime counts + HI join + HI categories)
+crime_daily <- crime_all %>%
+  dplyr::mutate(
+    dow   = lubridate::wday(crime_date, label = TRUE, abbr = TRUE),
+    month = lubridate::month(crime_date, label = TRUE, abbr = TRUE),
+    year  = lubridate::year(crime_date)
+  ) %>%
+  dplyr::group_by(city, crime_date, dow, month, year) %>%
+  dplyr::summarise(
+    n_total      = dplyr::n(),
+    n_violent    = sum(toupper(as.character(crime_type)) == "VIOLENT", na.rm = TRUE),
+    n_nonviolent = n_total - n_violent,
+    .groups = "drop"
+  ) %>%
+  dplyr::left_join(daily_hi_all, by = c("city", "crime_date" = "date")) %>%
+  dplyr::left_join(hi_thresholds_hw, by = "city") %>%
+  dplyr::mutate(
+    hi_cat = dplyr::case_when(
+  is.na(hi_max_f)                     ~ "Missing",
+  hi_max_f <  p85                     ~ "<85th",
+  hi_max_f >= p85 & hi_max_f < p95    ~ "Hot (85–95th)",
+  hi_max_f >= p95                     ~ "Extreme (≥95th)"
+),
+    hi_cat = factor(hi_cat, levels = c("<85th","Hot (85–95th)","Extreme (≥95th)","Missing"))
+  )
+
+cat("Missing HI values:", sum(is.na(crime_daily$hi_max_f)), "\n")
+cat("Date range:", min(crime_daily$crime_date, na.rm = TRUE), "to",
+    max(crime_daily$crime_date, na.rm = TRUE), "\n")
+cat("Cities:", paste(unique(crime_daily$city), collapse = ", "), "\n")
+```
+
+Split the dataset in two (one for each city)
+```{r}
+crime_daily_dc <- crime_daily %>%
+  dplyr::filter(city == "DC")
+
+crime_daily_bal <- crime_daily %>%
+  dplyr::filter(city == "Baltimore")
+```
+
+
+# Part 3: Statistical Models
+
+## Check Overdispersion
+```{r}
+check_od_city <- crime_daily %>%
+  dplyr::filter(hi_cat != "Missing") %>%
+  dplyr::group_by(city) %>%
+  dplyr::summarise(
+    mean_total = mean(n_total, na.rm = TRUE),
+    var_total  = var(n_total,  na.rm = TRUE),
+    ratio      = var_total / mean_total,
+    .groups = "drop"
+  )
+
+# Print the table as a kable
+check_od_city %>%
+  dplyr::mutate(
+    mean_total = round(mean_total, 2),
+    var_total  = round(var_total, 2),
+    ratio      = round(ratio, 2)
+  ) %>%
+  knitr::kable(
+    format = "html",
+    col.names = c("City", "Mean (Total Daily Crimes)", "Variance (Total Daily Crimes)", "Variance / Mean"),
+    caption = "Overdispersion Check by City (Daily Total Crime Counts)"
+  ) %>%
+  kableExtra::kable_styling(
+    bootstrap_options = c("striped", "condensed"),
+    full_width = FALSE
+  )
+```
+
+
+## Fit Negative Binomial Models
+```{r}
+## Fit Negative Binomial Models (Total, Violent, Non-Violent)
+dc_data  <- crime_daily_dc  %>% dplyr::filter(hi_cat != "Missing")
+bal_data <- crime_daily_bal %>% dplyr::filter(hi_cat != "Missing")
+
+# DC
+mod_dc_total      <- MASS::glm.nb(n_total      ~ hi_cat + dow + factor(month), data = dc_data)
+mod_dc_violent    <- MASS::glm.nb(n_violent    ~ hi_cat + dow + factor(month), data = dc_data)
+mod_dc_nonviolent <- MASS::glm.nb(n_nonviolent ~ hi_cat + dow + factor(month), data = dc_data)
+
+# Baltimore
+mod_bal_total      <- MASS::glm.nb(n_total      ~ hi_cat + dow + factor(month), data = bal_data)
+mod_bal_violent    <- MASS::glm.nb(n_violent    ~ hi_cat + dow + factor(month), data = bal_data)
+mod_bal_nonviolent <- MASS::glm.nb(n_nonviolent ~ hi_cat + dow + factor(month), data = bal_data)
+```
+
+
+## IRR Visualization Function
+```{r}
+## IRR helper: returns a tidy dataframe (not a plot)
+irr_df <- function(model, outcome_label, city_label) {
+
+  em <- emmeans::emmeans(model, ~ hi_cat, type = "response")
+  ct <- emmeans::contrast(em, method = "trt.vs.ctrl", ref = 1, type = "response")
+
+  ct_df <- as.data.frame(stats::confint(ct))
+
+  # Harmonize CI column names
+  nm <- names(ct_df)
+  if (!"lower.CL" %in% nm) {
+    if ("asymp.LCL" %in% nm) names(ct_df)[nm == "asymp.LCL"] <- "lower.CL"
+    else if ("LCL" %in% nm)  names(ct_df)[nm == "LCL"]       <- "lower.CL"
+  }
+  nm <- names(ct_df)
+  if (!"upper.CL" %in% nm) {
+    if ("asymp.UCL" %in% nm) names(ct_df)[nm == "asymp.UCL"] <- "upper.CL"
+    else if ("UCL" %in% nm)  names(ct_df)[nm == "UCL"]       <- "upper.CL"
+  }
+
+  # IRR column (usually "ratio")
+  ycol <- if ("ratio" %in% names(ct_df)) "ratio" else {
+    cand <- intersect(c("response", "estimate", "emmean"), names(ct_df))
+    if (length(cand) == 0) stop("Couldn't find IRR/estimate column in ct_df.")
+    cand[1]
+  }
+
+  ct_df %>%
+    dplyr::mutate(
+      hi_level = sub(" / <85th", "", contrast),
+      irr      = .data[[ycol]],
+      outcome  = outcome_label,
+      city     = city_label
+    ) %>%
+    dplyr::select(city, outcome, hi_level, irr, lower.CL, upper.CL)
+}
+
+```
+
+
+## Generate IRR Plots
+```{r}
+
+# Build IRR tables (DC + Baltimore; Total + Violent + Non-Violent)
+irr_dc <- dplyr::bind_rows(
+  irr_df(mod_dc_total,      "Total",       "DC"),
+  irr_df(mod_dc_violent,    "Violent",     "DC"),
+  irr_df(mod_dc_nonviolent, "Non-Violent", "DC")
+)
+
+irr_bal <- dplyr::bind_rows(
+  irr_df(mod_bal_total,      "Total",       "Baltimore"),
+  irr_df(mod_bal_violent,    "Violent",     "Baltimore"),
+  irr_df(mod_bal_nonviolent, "Non-Violent", "Baltimore")
+)
+
+plot_irr_city <- function(df_city, title) {
+
+  df_city <- df_city %>%
+    dplyr::mutate(
+      # Standardize dashes + whitespace so labels match
+      hi_level = stringr::str_squish(hi_level),
+      hi_level = stringr::str_replace_all(hi_level, "\u2013|\u2014", "-"),  # en/em dash -> hyphen
+
+      # Map anything containing "Hot" or "Extreme" to the exact labels you want
+      hi_level = dplyr::case_when(
+        stringr::str_detect(hi_level, "Hot")     ~ "Hot (85–95th)",
+        stringr::str_detect(hi_level, "Extreme") ~ "Extreme (≥95th)",
+        TRUE ~ hi_level
+      ),
+
+      # Force order
+      hi_level = factor(hi_level, levels = c("Hot (85–95th)", "Extreme (≥95th)"))
+    )
+
+  ggplot2::ggplot(
+    df_city,
+    ggplot2::aes(
+      x = hi_level,
+      y = irr,
+      ymin = lower.CL,
+      ymax = upper.CL,
+      shape = outcome,
+      linetype = outcome
+    )
+  ) +
+    ggplot2::geom_hline(yintercept = 1, linetype = 2) +
+    ggplot2::geom_pointrange(
+      position = ggplot2::position_dodge(width = 0.55)
+    ) +
+    ggplot2::scale_y_log10() +
+    ggplot2::labs(
+      title = title,
+      x = "Heat-index category vs <85th",
+      y = "Incidence Rate Ratio (log scale)"
+    ) +
+    ggplot2::theme_minimal(base_size = 12) +
+    ggplot2::theme(panel.grid = ggplot2::element_blank())
+}
+
+p_irr_dc  <- plot_irr_city(irr_dc,  "DC: IRR (Total / Violent / Non-violent) vs <85th")
+p_irr_bal <- plot_irr_city(irr_bal, "Baltimore: IRR (Total / Violent / Non-violent) vs <85th")
+
+print(p_irr_dc)
+print(p_irr_bal)
+```
+
+
+# Part 4: Publication-Ready Figures
+
+## Combine IRR tables
+```{r}
+# Combine IRR tables into one plotting dataframe
+irr_all_three <- dplyr::bind_rows(irr_dc, irr_bal) %>%
+  dplyr::mutate(
+    # Force the order you want on the x-axis
+    hi_level = factor(hi_level, levels = c("Hot (85–95th)", "Extreme (≥95th)")),
+    # Force legend / facet ordering
+    outcome  = factor(outcome, levels = c("Total", "Violent", "Non-Violent")),
+    city     = factor(city, levels = c("DC", "Baltimore"))
+  ) %>%
+  # rename to match your figure code below (IRR/LCL/UCL)
+  dplyr::rename(
+    IRR = irr,
+    LCL = lower.CL,
+    UCL = upper.CL
+  )
+
+# For the 2-outcome plot (Violent vs Non-Violent)
+irr_combined <- irr_all_three %>%
+  dplyr::filter(outcome %in% c("Violent", "Non-Violent")) %>%
+  dplyr::mutate(outcome = factor(outcome, levels = c("Violent", "Non-Violent")))
+
+```
+
+Set y-axis limit
+```{r}
+y_min     <- min(irr_combined$LCL, na.rm = TRUE) * 0.95
+y_max     <- max(irr_combined$UCL, na.rm = TRUE) * 1.05
+
+y_min_all <- min(irr_all_three$LCL, na.rm = TRUE) * 0.95
+y_max_all <- max(irr_all_three$UCL, na.rm = TRUE) * 1.05
+```
+
+Plot 1: Violent vs Non-Violent (faceted by outcome x city)
+```{r}
+
+p_vio_vs_nonvio <- ggplot2::ggplot(
+  irr_combined,
+  ggplot2::aes(x = hi_level, y = IRR, ymin = LCL, ymax = UCL)
+) +
+  ggplot2::geom_hline(yintercept = 1, linetype = 2) +
+  ggplot2::geom_pointrange(size = 0.8, fatten = 4) +
+  ggplot2::facet_grid(outcome ~ city) +
+  ggplot2::scale_y_log10(limits = c(y_min, y_max)) +
+  ggplot2::labs(
+    title = "Incidence Rate Ratios: Violent vs Non-Violent Crime on Hot/Extreme Days",
+    y = "Incidence Rate Ratio (log scale)",
+    x = "Heat Index Category (vs <85th percentile)"
+  ) +
+  ggplot2::theme_minimal(base_size = 12) +
+  ggplot2::theme(
+    panel.grid.minor = ggplot2::element_blank(),
+    strip.background = ggplot2::element_rect(fill = "grey90", color = NA),
+    strip.text = ggplot2::element_text(size = 12, face = "bold"),
+    axis.text.x = ggplot2::element_text(angle = 20, hjust = 1)
+  )
+
+print(p_vio_vs_nonvio)
+```
+
+Plot 2: Total + Violent + Non-Violent (one panel per city)
+```{r}
+p_all_three <- ggplot2::ggplot(
+  irr_all_three,
+  ggplot2::aes(
+    x = hi_level, y = IRR, ymin = LCL, ymax = UCL,
+    shape = outcome, linetype = outcome
+  )
+) +
+  ggplot2::geom_hline(yintercept = 1, linetype = 2) +
+  ggplot2::geom_pointrange(
+    position = ggplot2::position_dodge(width = 0.45),
+    size = 0.9, fatten = 5
+  ) +
+  ggplot2::facet_wrap(~ city, ncol = 2) +
+  ggplot2::scale_y_log10(limits = c(y_min_all, y_max_all)) +
+  ggplot2::labs(
+    title = "Incidence Rate Ratios: Total, Violent, and Non-Violent Crime on Hot/Extreme Days",
+    y = "Incidence Rate Ratio (log scale)",
+    x = "Heat Index Category (vs <85th percentile)"
+  ) +
+  ggplot2::theme_minimal(base_size = 12) +
+  ggplot2::theme(
+    panel.grid.minor = ggplot2::element_blank(),
+    legend.position = "top",
+    strip.background = ggplot2::element_rect(fill = "grey90", color = NA),
+    strip.text = ggplot2::element_text(size = 14, face = "bold"),
+    axis.text.x = ggplot2::element_text(angle = 20, hjust = 1)
+  )
+
+print(p_all_three)
+
+```
+
+
+
+## Create the Final AJPH Figure
+```{r}
+irr_all_three$city <- dplyr::recode(irr_all_three$city, "Washington, D.C." = "Washington, DC")
+
+irr_all_three$city <- dplyr::recode(irr_all_three$city, "Baltimore" = "Baltimore, MD")
+
+p_all_three <- ggplot2::ggplot(
+  irr_all_three,
+  ggplot2::aes(
+    x = hi_level, y = IRR, ymin = LCL, ymax = UCL,
+    shape = outcome, color = outcome
+  )
+) +
+  ggplot2::geom_pointrange(
+    position = ggplot2::position_dodge(width = 0.45),
+    size = 1.2,      
+    fatten = 7       
+  ) +
+  ggplot2::facet_wrap(~ city, ncol = 2) +
+  ggplot2::scale_y_log10(limits = c(y_min_all, y_max_all)) +
+  ggplot2::scale_x_discrete(
+    labels = c(
+      "Hot (85-95th)",
+      "Extreme Heat (≥ 95th)"
+    )
+  ) +
+  ggplot2::scale_color_manual(
+    values = c(
+      "Total"       = "#440154",  # dark purple
+      "Violent"     = "#31688e",  # blue
+      "Non-Violent" = "#35b779"   # green
+    ),
+    name = "Crime Type"
+  ) +
+  ggplot2::scale_shape_manual(
+    values = c("Total" = 16, "Violent" = 17, "Non-Violent" = 15),
+    name = "Crime Type"
+  ) +
+  ggplot2::labs(
+    title = "Incidence Rate Ratios: Total, Violent, and Non-Violent Crime on Hot/Extreme Days",
+    y = "Incidence Rate Ratio",
+    x = "Heat Index Category (vs <85th percentile)"
+  ) +
+  ggplot2::theme_minimal(base_size = 12) +
+  ggplot2::theme(
+  panel.grid.minor = ggplot2::element_blank(),
+  legend.position = "inside",
+  legend.position.inside = c(0.91, 0.75),
+  legend.background = ggplot2::element_rect(fill = "white", color = "grey50"),
+  strip.background = ggplot2::element_rect(fill = "grey90", color = NA),
+  strip.text = ggplot2::element_text(size = 12, face = "bold"),
+  axis.title.x = ggplot2::element_text(size = 16, color = "black"),
+  axis.text.x  = ggplot2::element_text(size = 16, angle = 20, hjust = 1, color = "black"),
+  axis.title.y = ggplot2::element_text(size = 14, color = "black"),
+  axis.text.y  = ggplot2::element_text(size = 12, color = "black")
+)
+print(p_all_three)
+```
+
+## Save Figures
+```{r}
+ggplot2::ggsave(
+  filename = "AJPH_Fig2_All_Three_Crime_Types.png",
+  plot     = p_all_three,
+  width    = 10,
+  height   = 6,
+  units    = "in",
+  dpi      = 300)
+```
+
+## Create Summary Table
+```{r}
+# IRR summary table
+
+irr_summary_table <- irr_all_three %>%
+  dplyr::mutate(
+    # City labels
+    city = dplyr::recode(as.character(city), "DC" = "Washington, DC"),
+
+    # Heat category labels
+    hi_level = dplyr::recode(
+      as.character(hi_level),
+      "Hot (85–95th)"   = "Hot (85–95th)",
+      "Extreme (≥95th)" = "Extreme Heat (≥95th)"
+    ),
+    hi_level = factor(hi_level, levels = c("Hot (85–95th)", "Extreme Heat (≥95th)")),
+
+    # Combine IRR + CI into one column
+    IRR_CI = sprintf("%.3f (%.3f–%.3f)", IRR, LCL, UCL)
+  ) %>%
+  dplyr::select(
+    City = city,
+    `Crime Type` = outcome,
+    `Heat Category` = hi_level,
+    `IRR (95% CI)` = IRR_CI
+  ) %>%
+  dplyr::arrange(City, `Crime Type`, `Heat Category`)
+
+# Print table in the knitted HTML
+irr_summary_table %>%
+  knitr::kable(
+    format = "html",
+    caption = "Summary of Incidence Rate Ratios by Crime Type and Heat Category"
+  ) %>%
+  kableExtra::kable_styling(
+    bootstrap_options = c("striped", "condensed"),
+    full_width = FALSE
+  ) %>%
+  kableExtra::collapse_rows(columns = 1:2, valign = "top")
+
+# Save CSV
+readr::write_csv(irr_summary_table, "AJPH_IRR_Summary_Table.csv")
+```
+
+Count of days in each heat category
+```{r}
+# Count days by heat category
+heat_day_counts <- crime_daily %>%
+  filter(hi_cat != "Missing") %>%
+  group_by(city, hi_cat) %>%
+  summarise(
+    n_days = n(),
+    .groups = "drop"
+  ) %>%
+  pivot_wider(names_from = city, values_from = n_days)
+
+heat_day_counts %>%
+  kable(
+    format = "html",
+    col.names = c("Heat Category", "Baltimore (days)", "DC (days)"),
+    caption = "Number of Days in Each Heat Index Category (2020-2024)"
+  ) %>%
+  kable_styling(
+    bootstrap_options = c("striped", "condensed"),
+    full_width = FALSE
+  )
+```
+
+Summarize HI values for each category
+```{r}
+# Summary statistics for HI by category
+hi_summary_by_cat <- crime_daily %>%
+  filter(hi_cat != "Missing") %>%
+  group_by(city, hi_cat) %>%
+  summarise(
+    mean_hi = mean(hi_max_f, na.rm = TRUE),
+    median_hi = median(hi_max_f, na.rm = TRUE),
+    min_hi = min(hi_max_f, na.rm = TRUE),
+    max_hi = max(hi_max_f, na.rm = TRUE),
+    sd_hi = sd(hi_max_f, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  mutate(across(mean_hi:sd_hi, ~round(., 1)))
+
+hi_summary_by_cat %>%
+  kable(
+    format = "html",
+    col.names = c("City", "Heat Category", "Mean HI (°F)", 
+                  "Median HI (°F)", "Min HI (°F)", "Max HI (°F)", "SD"),
+    caption = "Summary of Daily Maximum Heat Index by Category"
+  ) %>%
+  kable_styling(
+    bootstrap_options = c("striped", "condensed"),
+    full_width = FALSE
+  )
+```
+
+# Sensitivity Analysis
+
+## Workday vs. Day off Work (DOW) analysis
+```{r}
+# Create workday variable
+crime_daily <- crime_daily %>%
+  mutate(
+    workday = ifelse(dow %in% c("Sat", "Sun"), "Weekend", "Workday"),
+    workday = factor(workday, levels = c("Workday", "Weekend"))
+  )
+
+# Recreate the city-specific datasets AFTER adding workday
+crime_daily_dc <- crime_daily %>%
+  dplyr::filter(city == "DC")
+
+crime_daily_bal <- crime_daily %>%
+  dplyr::filter(city == "Baltimore")
+
+# NOW refit models with workday instead of dow
+dc_data_wd  <- crime_daily_dc  %>% filter(hi_cat != "Missing")
+bal_data_wd <- crime_daily_bal %>% filter(hi_cat != "Missing")
+
+# DC - workday models
+mod_dc_total_wd      <- MASS::glm.nb(n_total      ~ hi_cat + workday + factor(month), data = dc_data_wd)
+mod_dc_violent_wd    <- MASS::glm.nb(n_violent    ~ hi_cat + workday + factor(month), data = dc_data_wd)
+mod_dc_nonviolent_wd <- MASS::glm.nb(n_nonviolent ~ hi_cat + workday + factor(month), data = dc_data_wd)
+
+# Baltimore - workday models
+mod_bal_total_wd      <- MASS::glm.nb(n_total      ~ hi_cat + workday + factor(month), data = bal_data_wd)
+mod_bal_violent_wd    <- MASS::glm.nb(n_violent    ~ hi_cat + workday + factor(month), data = bal_data_wd)
+mod_bal_nonviolent_wd <- MASS::glm.nb(n_nonviolent ~ hi_cat + workday + factor(month), data = bal_data_wd)
+
+# Compare IRRs for heat categories between models
+# Extract IRRs from workday models
+irr_dc_wd <- dplyr::bind_rows(
+  irr_df(mod_dc_total_wd,      "Total",       "DC"),
+  irr_df(mod_dc_violent_wd,    "Violent",     "DC"),
+  irr_df(mod_dc_nonviolent_wd, "Non-Violent", "DC")
+)
+
+irr_bal_wd <- dplyr::bind_rows(
+  irr_df(mod_bal_total_wd,      "Total",       "Baltimore"),
+  irr_df(mod_bal_violent_wd,    "Violent",     "Baltimore"),
+  irr_df(mod_bal_nonviolent_wd, "Non-Violent", "Baltimore")
+)
+
+# Compare side-by-side
+comparison <- irr_dc %>%
+  dplyr::select(city, outcome, hi_level, irr_dow = irr) %>%
+  dplyr::left_join(
+    irr_dc_wd %>% dplyr::select(city, outcome, hi_level, irr_workday = irr),
+    by = c("city", "outcome", "hi_level")
+  )
+
+
+print(comparison)
+```
+
+### Include holidays in DOW:
+
+##### I got the DC holiday dates from: https://edpm.dc.gov/issuances/legal-public-holidays-2023/ (for every different year)
+
+DC Holidays in 2020:
+- New Year’s Day	Wednesday, January 1
+- Martin Luther King Jr’s Birthday	Monday, January 20
+- Washington’s Birthday	Monday, February 17
+- D.C. Emancipation Day	Thursday, April 16
+- Memorial Day	Monday, May 25
+- Independence Day	Friday, July 3
+- Labor Day	Monday, September 7
+- Indigenous Peoples’ Day	Monday, October 12
+- Veterans Day	Wednesday, November 11
+- Thanksgiving Day	Thursday, November 26
+- Christmas Day	Friday, December 25
+
+DC Holidays in 2021:
+- New Year's Day	Friday, January 1, 2021
+- Dr. Martin Luther King Jr.'s Birthday	Monday, January 18, 2021
+- Inauguration Day	Wednesday, January 20, 2021
+- Washington's Birthday	Monday, February 15, 2021
+- D.C. Emancipation Day	Friday, April 16, 2021
+- Memorial Day	Monday, May 31, 2021
+- Juneteenth National Independence Day	Friday, June 18, 2021
+- Independence Day	Monday, July 5, 2021
+- Labor Day	Monday, September 6, 2021
+- Indigenous Peoples' Day	Monday, October 11, 2021
+- Veterans Day	Thursday, November 11, 2021
+- Thanksgiving Day	Thursday, November 25, 2021
+- Christmas Day	Friday, December 24, 2021
+
+DC Holidays in 2022:
+- New Year's Day	Friday, December 31, 2021
+- Dr. Martin Luther King, Jr.'s Birthday	Monday, January 17, 2022
+- Washington's Birthday	Monday, February 21, 2022
+- D.C. Emancipation Day	Friday, April 15, 2022
+- Memorial Day	Monday, May 30, 2022
+- Juneteenth National Independence Day	Monday, June 20, 2022
+- Independence Day	Monday, July 4, 2022
+- Labor Day	Monday, September 5, 2022
+- Indigenous Peoples' Day	Monday, October 10, 2022
+- Veterans Day	Friday, November 11, 2022
+- Thanksgiving Day	Thursday, November 24, 2022
+- Christmas Day	Monday, December 26, 2022
+
+DC Holidays in 2023:
+- New Year's Day	Monday, January 2, 2023
+- Dr. Martin Luther King, Jr.'s Birthday	Monday, January 16, 2023
+- Washington's Birthday	Monday, February 20, 2023
+- D.C. Emancipation Day	Monday, April 17, 2023
+- Memorial Day	Monday, May 29, 2023
+- Juneteenth National Independence Day	Monday, June 19, 2023
+- Independence Day	Tuesday, July 4, 2023
+- Labor Day	Monday, September 4, 2023
+- Indigenous Peoples' Day	Monday, October 9, 2023
+- Veterans Day	Friday, November 10, 2023
+- Thanksgiving Day	Thursday, November 23, 2023
+- Christmas Day	Monday, December 25, 2023
+
+
+DC Holidays in 2024:
+- New Year's Day	Monday, January 1, 2024
+- Dr. Martin Luther King, Jr.'s Birthday	Monday, January 15, 2024
+- Washington's Birthday	Monday, February 19, 2024
+- D.C. Emancipation Day	Tuesday, April 16, 2024
+- Memorial Day	Monday, May 27, 2024
+- Juneteenth National Independence Day	Wednesday, June 19, 2024
+- Independence Day	Thursday, July 4, 2024
+- Labor Day	Monday, September 2, 2024
+- Indigenous Peoples' Day	Monday, October 14, 2024
+- Veterans Day	Monday, November 11, 2024
+- Thanksgiving Day	Thursday, November 28, 2024
+- Christmas Day	Wednesday, December 25, 2024
+
+#### Maryland public holidays: 
+I retrieved Maryland public holidays from: https://dbm.maryland.gov/employees/Pages/StateHolidays2023.aspx
+
+Maryland Holidays in 2020:
+New Year's Day	Wednesday	January 1
+Birthday of Dr. Martin Luther King, Jr	Monday	January 20
+Presidents' Day	Monday	February 17
+Memorial Day	Monday	May 25
+Independence Day	Friday	July 3
+Labor Day	Monday	September 7
+Columbus Day	Monday	October 12
+Election Day	Tuesday	November 3
+Veterans Day	Wednesday November 11
+Thanksgiving Day	Thursday	November 26
+American Indian Heritage Day	Friday	November 27
+Christmas Day	Friday	December 25
+
+Maryland Holidays in 2021:
+- New Year's Day Friday	January 1 
+- Birthday of Dr. Martin Luther King, Jr	Monday	January 18
+- Presidents' Day	Monday	February 15
+- Memorial Day	Monday	May 31 Independence Day	Monday	July 5
+- Labor Day	Monday	September 6
+- Columbus Day	Monday	October 11
+- Veterans Day	Thursday November 11
+- Thanksgiving Day	Thursday	November 25
+- American Indian Heritage Day	Friday	November 26
+- Christmas Day	Friday	December 24
+- New Year's Day	Friday	December 31
+
+Maryland Holidays in 2022:
+- New Year's Day*	Friday	December 31 
+- Birthday of Dr. Martin Luther King, Jr	Monday	January 17 
+- Presidents' Day	Monday	February 21 
+- Memorial Day	Monday	May 30 Juneteenth	Monday	June 20 
+- Independence Day	Monday	July 4 
+- Labor Day	Monday	September 5
+- Columbus Day	Monday	October 10
+- Gubernatorial Election Day	Tuesday	November 8
+- Veterans Day	Friday November 11
+- Thanksgiving Day	Thursday	November 24
+- American Indian Heritage Day	Friday	November 25
+- Christmas Day*	Monday	December 26
+
+Maryland Holidays in 2023:
+- New Year's Day Monday January 2 
+- Birthday of Dr. Martin Luther King, Jr. Monday January 16 
+- Presidents' Day	Monday	February 20 
+- Memorial Day	Monday	May 29 
+- Juneteenth Monday June 19 
+- Independence Day	Tuesday July 4 
+- Labor Day	Monday	September 4
+- Columbus Day	Monday	October 9 
+- Veterans' Day Friday November 10 
+- Thanksgiving Day	Thursday	November 23 
+- American Indian Heritage Day	Friday	November 24 
+- Christmas Day Monday December 25
+
+Maryland Holidays in 2024:
+- New Year's Day Monday January 1
+- Birthday of Dr. Martin Luther King, Jr. Monday January 15
+- Presidents' Day	Monday	February 19 
+- Memorial Day	Monday	May 27 
+- Juneteenth Wednesday June 19 
+- Independence Day	Thursday July 4 
+- Labor Day	Monday	September 2 
+- Columbus Day	Monday	October 14 
+- Election Day Tuesday November 5 
+- Veterans' Day Monday November 11 
+- Thanksgiving Day	Thursday	November 28 
+- American Indian Heritage Day	Friday	November 29 
+- Christmas Day Wednesday December 25
+
+### Another sensivity Analysis Workday vs DOW (Weekend + Holiday)
+```{r}
+# Sensitivity Analysis: Workday vs. Non-Workday (including holidays)
+
+## Define DC holidays
+dc_holidays <- as.Date(c(
+  # 2020
+  "2020-01-01", "2020-01-20", "2020-02-17", "2020-04-16", "2020-05-25",
+  "2020-07-03", "2020-09-07", "2020-10-12", "2020-11-11", "2020-11-26",
+  "2020-12-25",
+  # 2021
+  "2021-01-01", "2021-01-18", "2021-01-20", "2021-02-15", "2021-04-16",
+  "2021-05-31", "2021-06-18", "2021-07-05", "2021-09-06", "2021-10-11",
+  "2021-11-11", "2021-11-25", "2021-12-24",
+  # 2022
+  "2021-12-31", "2022-01-17", "2022-02-21", "2022-04-15", "2022-05-30",
+  "2022-06-20", "2022-07-04", "2022-09-05", "2022-10-10", "2022-11-11",
+  "2022-11-24", "2022-12-26",
+  # 2023
+  "2023-01-02", "2023-01-16", "2023-02-20", "2023-04-17", "2023-05-29",
+  "2023-06-19", "2023-07-04", "2023-09-04", "2023-10-09", "2023-11-10",
+  "2023-11-23", "2023-12-25",
+  # 2024
+  "2024-01-01", "2024-01-15", "2024-02-19", "2024-04-16", "2024-05-27",
+  "2024-06-19", "2024-07-04", "2024-09-02", "2024-10-14", "2024-11-11",
+  "2024-11-28", "2024-12-25"
+))
+
+## Define Maryland holidays
+md_holidays <- as.Date(c(
+  # 2020
+  "2020-01-01", "2020-01-20", "2020-02-17", "2020-05-25", "2020-07-03",
+  "2020-09-07", "2020-10-12", "2020-11-03", "2020-11-11", "2020-11-26",
+  "2020-11-27", "2020-12-25",
+  # 2021
+  "2021-01-01", "2021-01-18", "2021-02-15", "2021-05-31", "2021-07-05",
+  "2021-09-06", "2021-10-11", "2021-11-11", "2021-11-25", "2021-11-26",
+  "2021-12-24", "2021-12-31",
+  # 2022
+  "2022-01-17", "2022-02-21", "2022-05-30", "2022-06-20",
+  "2022-07-04", "2022-09-05", "2022-10-10", "2022-11-08", "2022-11-11",
+  "2022-11-24", "2022-11-25", "2022-12-26",
+  # 2023
+  "2023-01-02", "2023-01-16", "2023-02-20", "2023-05-29", "2023-06-19",
+  "2023-07-04", "2023-09-04", "2023-10-09", "2023-11-10", "2023-11-23",
+  "2023-11-24", "2023-12-25",
+  # 2024
+  "2024-01-01", "2024-01-15", "2024-02-19", "2024-05-27", "2024-06-19",
+  "2024-07-04", "2024-09-02", "2024-10-14", "2024-11-05", "2024-11-11",
+  "2024-11-28", "2024-11-29", "2024-12-25"
+))
+
+## Create workday variable (weekends + holidays = non-workday)
+crime_daily <- crime_daily %>%
+  mutate(
+    # First check if weekend
+    is_weekend = dow %in% c("Sat", "Sun"),
+    # Then check if holiday (city-specific)
+    is_holiday = case_when(
+      city == "DC" ~ crime_date %in% dc_holidays,
+      city == "Baltimore" ~ crime_date %in% md_holidays,
+      TRUE ~ FALSE
+    ),
+    # Combine weekend and holiday
+    workday_incl_holidays = case_when(
+      is_weekend | is_holiday ~ "Non-Workday",
+      TRUE ~ "Workday"
+    ),
+    workday_incl_holidays = factor(workday_incl_holidays, 
+                                   levels = c("Workday", "Non-Workday"))
+  )
+
+# Verify the number of holidays captured
+cat("DC holidays in dataset:", 
+    sum(crime_daily$city == "DC" & crime_daily$is_holiday, na.rm = TRUE), "\n")
+cat("Baltimore holidays in dataset:", 
+    sum(crime_daily$city == "Baltimore" & crime_daily$is_holiday, na.rm = TRUE), "\n")
+
+# Summary of workdays vs non-workdays by city
+crime_daily %>%
+  group_by(city, workday_incl_holidays) %>%
+  summarise(n_days = n(), .groups = "drop") %>%
+  kable(
+    format = "html",
+    col.names = c("City", "Day Type", "Number of Days"),
+    caption = "Distribution of Workdays vs Non-Workdays (including holidays)"
+  ) %>%
+  kable_styling(
+    bootstrap_options = c("striped", "condensed"),
+    full_width = FALSE
+  )
+
+# RECREATE the city-specific datasets AFTER adding workday_incl_holidays
+crime_daily_dc <- crime_daily %>%
+  dplyr::filter(city == "DC")
+
+crime_daily_bal <- crime_daily %>%
+  dplyr::filter(city == "Baltimore")
+
+# Refit models with workday_incl_holidays
+dc_data_wdh  <- crime_daily_dc  %>% filter(hi_cat != "Missing")
+bal_data_wdh <- crime_daily_bal %>% filter(hi_cat != "Missing")
+
+# DC - workday models (including holidays)
+mod_dc_total_wdh      <- MASS::glm.nb(n_total      ~ hi_cat + workday_incl_holidays + factor(month), 
+                                      data = dc_data_wdh)
+mod_dc_violent_wdh    <- MASS::glm.nb(n_violent    ~ hi_cat + workday_incl_holidays + factor(month), 
+                                      data = dc_data_wdh)
+mod_dc_nonviolent_wdh <- MASS::glm.nb(n_nonviolent ~ hi_cat + workday_incl_holidays + factor(month), 
+                                      data = dc_data_wdh)
+
+# Baltimore - workday models (including holidays)
+mod_bal_total_wdh      <- MASS::glm.nb(n_total      ~ hi_cat + workday_incl_holidays + factor(month), 
+                                       data = bal_data_wdh)
+mod_bal_violent_wdh    <- MASS::glm.nb(n_violent    ~ hi_cat + workday_incl_holidays + factor(month), 
+                                       data = bal_data_wdh)
+mod_bal_nonviolent_wdh <- MASS::glm.nb(n_nonviolent ~ hi_cat + workday_incl_holidays + factor(month), 
+                                       data = bal_data_wdh)
+
+# Extract IRRs from workday+holidays models
+irr_dc_wdh <- dplyr::bind_rows(
+  irr_df(mod_dc_total_wdh,      "Total",       "DC"),
+  irr_df(mod_dc_violent_wdh,    "Violent",     "DC"),
+  irr_df(mod_dc_nonviolent_wdh, "Non-Violent", "DC")
+)
+
+irr_bal_wdh <- dplyr::bind_rows(
+  irr_df(mod_bal_total_wdh,      "Total",       "Baltimore"),
+  irr_df(mod_bal_violent_wdh,    "Violent",     "Baltimore"),
+  irr_df(mod_bal_nonviolent_wdh, "Non-Violent", "Baltimore")
+)
+
+# Compare all three approaches: DOW vs Workday vs Workday+Holidays
+comparison_all <- irr_dc %>%
+  dplyr::select(city, outcome, hi_level, irr_dow = irr, 
+                lower_dow = lower.CL, upper_dow = upper.CL) %>%
+  dplyr::left_join(
+    irr_dc_wd %>% dplyr::select(city, outcome, hi_level, irr_workday = irr,
+                                lower_wd = lower.CL, upper_wd = upper.CL),
+    by = c("city", "outcome", "hi_level")
+  ) %>%
+  dplyr::left_join(
+    irr_dc_wdh %>% dplyr::select(city, outcome, hi_level, irr_workday_holidays = irr,
+                                 lower_wdh = lower.CL, upper_wdh = upper.CL),
+    by = c("city", "outcome", "hi_level")
+  )
+
+# Add Baltimore data
+comparison_all <- comparison_all %>%
+  dplyr::bind_rows(
+    irr_bal %>%
+      dplyr::select(city, outcome, hi_level, irr_dow = irr, 
+                    lower_dow = lower.CL, upper_dow = upper.CL) %>%
+      dplyr::left_join(
+        irr_bal_wd %>% dplyr::select(city, outcome, hi_level, irr_workday = irr,
+                                     lower_wd = lower.CL, upper_wd = upper.CL),
+        by = c("city", "outcome", "hi_level")
+      ) %>%
+      dplyr::left_join(
+        irr_bal_wdh %>% dplyr::select(city, outcome, hi_level, irr_workday_holidays = irr,
+                                      lower_wdh = lower.CL, upper_wdh = upper.CL),
+        by = c("city", "outcome", "hi_level")
+      )
+  )
+
+# Create formatted comparison table
+comparison_table <- comparison_all %>%
+  mutate(
+    DOW_Model = sprintf("%.2f (%.2f–%.2f)", irr_dow, lower_dow, upper_dow),
+    Workday_Model = sprintf("%.2f (%.2f–%.2f)", irr_workday, lower_wd, upper_wd),
+    Workday_Holidays_Model = sprintf("%.2f (%.2f–%.2f)", irr_workday_holidays, lower_wdh, upper_wdh)
+  ) %>%
+  dplyr::select(city, outcome, hi_level, DOW_Model, Workday_Model, Workday_Holidays_Model)
+
+# Display comparison table
+comparison_table %>%
+  kable(
+    format = "html",
+    col.names = c("City", "Crime Type", "Heat Level", 
+                  "DOW Model IRR (95% CI)", 
+                  "Workday Model IRR (95% CI)",
+                  "Workday + Holidays Model IRR (95% CI)"),
+    caption = "Sensitivity Analysis: Comparison of IRRs Across Different Day-of-Week Specifications"
+  ) %>%
+  kable_styling(
+    bootstrap_options = c("striped", "condensed"),
+    full_width = FALSE
+  ) %>%
+  collapse_rows(columns = 1:2, valign = "top")
+
+# Save comparison table
+readr::write_csv(comparison_table, "sensitivity_analysis_dow_comparison.csv")
+
+# Print summary
+cat("\n=== SENSITIVITY ANALYSIS SUMMARY ===\n")
+cat("Models fitted:\n")
+cat("1. DOW Model: Adjusts for day of week (7 categories)\n")
+cat("2. Workday Model: Adjusts for workday vs weekend (2 categories)\n")
+cat("3. Workday + Holidays Model: Adjusts for workday vs non-workday (weekends + holidays)\n\n")
+```
+
+### Another Sensitivity Analysis: Max Temp
+Using daily maximum temperature instead of heat index
+```{r}
+# Sensitivity Analysis: Daily Maximum Temperature Instead of Heat Index
+
+## Extract Daily Maximum Temperature from ASOS data
+dc_daily_temp <- dc_hr %>%
+  dplyr::group_by(date) %>%
+  dplyr::summarise(
+    temp_mean_f = if (all(is.na(tmpf))) NA_real_ else mean(tmpf, na.rm = TRUE),
+    temp_max_f  = if (all(is.na(tmpf))) NA_real_ else max(tmpf,  na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  dplyr::filter(date <= as.Date("2024-12-31")) %>%
+  dplyr::mutate(city = "DC")
+
+bal_daily_temp <- bal_hr %>%
+  dplyr::group_by(date) %>%
+  dplyr::summarise(
+    temp_mean_f = if (all(is.na(tmpf))) NA_real_ else mean(tmpf, na.rm = TRUE),
+    temp_max_f  = if (all(is.na(tmpf))) NA_real_ else max(tmpf,  na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  dplyr::filter(date <= as.Date("2024-12-31")) %>%
+  dplyr::mutate(city = "Baltimore")
+
+# Combine temperature data
+daily_temp_all <- dplyr::bind_rows(dc_daily_temp, bal_daily_temp) %>%
+  dplyr::select(city, date, temp_mean_f, temp_max_f)
+
+## Calculate Temperature Percentile Thresholds (85th and 95th)
+temp_thresholds <- daily_temp_all %>%
+  dplyr::group_by(city) %>%
+  dplyr::summarise(
+    p85_temp = quantile(temp_max_f, 0.85, na.rm = TRUE),
+    p95_temp = quantile(temp_max_f, 0.95, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+# Display thresholds
+temp_thresholds %>%
+  dplyr::mutate(
+    p85_temp = round(p85_temp, 1),
+    p95_temp = round(p95_temp, 1)
+  ) %>%
+  knitr::kable(
+    format = "html",
+    col.names = c("City", "85th Percentile (Max Temp °F)", "95th Percentile (Max Temp °F)"),
+    caption = "Temperature Thresholds (Daily Max Temperature)"
+  ) %>%
+  kableExtra::kable_styling(
+    bootstrap_options = c("striped", "condensed"),
+    full_width = FALSE
+  )
+
+## Create Crime Daily Dataset with Temperature Categories
+crime_daily_temp <- crime_all %>%
+  dplyr::mutate(
+    dow   = lubridate::wday(crime_date, label = TRUE, abbr = TRUE),
+    month = lubridate::month(crime_date, label = TRUE, abbr = TRUE),
+    year  = lubridate::year(crime_date)
+  ) %>%
+  dplyr::group_by(city, crime_date, dow, month, year) %>%
+  dplyr::summarise(
+    n_total      = dplyr::n(),
+    n_violent    = sum(toupper(as.character(crime_type)) == "VIOLENT", na.rm = TRUE),
+    n_nonviolent = n_total - n_violent,
+    .groups = "drop"
+  ) %>%
+  dplyr::left_join(daily_temp_all, by = c("city", "crime_date" = "date")) %>%
+  dplyr::left_join(temp_thresholds, by = "city") %>%
+  dplyr::mutate(
+    temp_cat = dplyr::case_when(
+      is.na(temp_max_f)                        ~ "Missing",
+      temp_max_f <  p85_temp                   ~ "<85th",
+      temp_max_f >= p85_temp & temp_max_f < p95_temp ~ "Hot (85–95th)",
+      temp_max_f >= p95_temp                   ~ "Extreme (≥95th)"
+    ),
+    temp_cat = factor(temp_cat, levels = c("<85th","Hot (85–95th)","Extreme (≥95th)","Missing"))
+  )
+
+# Split by city
+crime_daily_temp_dc <- crime_daily_temp %>%
+  dplyr::filter(city == "DC")
+
+crime_daily_temp_bal <- crime_daily_temp %>%
+  dplyr::filter(city == "Baltimore")
+
+## Fit Negative Binomial Models Using Temperature
+dc_data_temp  <- crime_daily_temp_dc  %>% dplyr::filter(temp_cat != "Missing")
+bal_data_temp <- crime_daily_temp_bal %>% dplyr::filter(temp_cat != "Missing")
+
+# DC models
+mod_dc_total_temp      <- MASS::glm.nb(n_total      ~ temp_cat + dow + factor(month), data = dc_data_temp)
+mod_dc_violent_temp    <- MASS::glm.nb(n_violent    ~ temp_cat + dow + factor(month), data = dc_data_temp)
+mod_dc_nonviolent_temp <- MASS::glm.nb(n_nonviolent ~ temp_cat + dow + factor(month), data = dc_data_temp)
+
+# Baltimore models
+mod_bal_total_temp      <- MASS::glm.nb(n_total      ~ temp_cat + dow + factor(month), data = bal_data_temp)
+mod_bal_violent_temp    <- MASS::glm.nb(n_violent    ~ temp_cat + dow + factor(month), data = bal_data_temp)
+mod_bal_nonviolent_temp <- MASS::glm.nb(n_nonviolent ~ temp_cat + dow + factor(month), data = bal_data_temp)
+
+## Modified IRR helper function that accepts variable name
+irr_df_custom <- function(model, outcome_label, city_label, var_name = "hi_cat") {
+  
+  # Create formula dynamically
+  em <- emmeans::emmeans(model, stats::as.formula(paste("~", var_name)), type = "response")
+  ct <- emmeans::contrast(em, method = "trt.vs.ctrl", ref = 1, type = "response")
+  
+  ct_df <- as.data.frame(stats::confint(ct))
+  
+  # Harmonize CI column names
+  nm <- names(ct_df)
+  if (!"lower.CL" %in% nm) {
+    if ("asymp.LCL" %in% nm) names(ct_df)[nm == "asymp.LCL"] <- "lower.CL"
+    else if ("LCL" %in% nm)  names(ct_df)[nm == "LCL"]       <- "lower.CL"
+  }
+  nm <- names(ct_df)
+  if (!"upper.CL" %in% nm) {
+    if ("asymp.UCL" %in% nm) names(ct_df)[nm == "asymp.UCL"] <- "upper.CL"
+    else if ("UCL" %in% nm)  names(ct_df)[nm == "UCL"]       <- "upper.CL"
+  }
+  
+  # IRR column (usually "ratio")
+  ycol <- if ("ratio" %in% names(ct_df)) "ratio" else {
+    cand <- intersect(c("response", "estimate", "emmean"), names(ct_df))
+    if (length(cand) == 0) stop("Couldn't find IRR/estimate column in ct_df.")
+    cand[1]
+  }
+  
+  ct_df %>%
+    dplyr::mutate(
+      hi_level = sub(paste0(" / <85th"), "", contrast),
+      irr      = .data[[ycol]],
+      outcome  = outcome_label,
+      city     = city_label
+    ) %>%
+    dplyr::select(city, outcome, hi_level, irr, lower.CL, upper.CL)
+}
+
+## Extract IRRs for Temperature Models
+irr_dc_temp <- dplyr::bind_rows(
+  irr_df_custom(mod_dc_total_temp,      "Total",       "DC", "temp_cat"),
+  irr_df_custom(mod_dc_violent_temp,    "Violent",     "DC", "temp_cat"),
+  irr_df_custom(mod_dc_nonviolent_temp, "Non-Violent", "DC", "temp_cat")
+)
+
+irr_bal_temp <- dplyr::bind_rows(
+  irr_df_custom(mod_bal_total_temp,      "Total",       "Baltimore", "temp_cat"),
+  irr_df_custom(mod_bal_violent_temp,    "Violent",     "Baltimore", "temp_cat"),
+  irr_df_custom(mod_bal_nonviolent_temp, "Non-Violent", "Baltimore", "temp_cat")
+)
+
+# Combine all temperature IRRs
+# Combine all temperature IRRs (define it first!)
+irr_all_temp <- dplyr::bind_rows(irr_dc_temp, irr_bal_temp) %>%
+  dplyr::mutate(
+    # Standardize join keys NOW (same as irr_all_three)
+    city = dplyr::recode(city,
+      "Baltimore" = "Baltimore, MD",
+      "DC"        = "DC"
+    ),
+    hi_level = stringr::str_squish(hi_level),
+    hi_level = dplyr::case_when(
+      stringr::str_detect(hi_level, "Hot")     ~ "Hot (85–95th)",
+      stringr::str_detect(hi_level, "Extreme") ~ "Extreme (≥95th)",
+      TRUE ~ hi_level
+    )
+  ) %>%
+  dplyr::rename(IRR = irr, LCL = lower.CL, UCL = upper.CL)
+
+
+## Compare Heat Index vs Temperature Models
+# Combine HI and Temp results for comparison
+comparison_hi_vs_temp <- irr_all_three %>%
+  dplyr::select(city, outcome, hi_level, IRR_HI = IRR, LCL_HI = LCL, UCL_HI = UCL) %>%
+  dplyr::left_join(
+    irr_all_temp %>% dplyr::select(city, outcome, hi_level, IRR_Temp = IRR, LCL_Temp = LCL, UCL_Temp = UCL),
+    by = c("city", "outcome", "hi_level")
+  ) %>%
+  dplyr::mutate(
+    HI_Model = sprintf("%.3f (%.3f–%.3f)", IRR_HI, LCL_HI, UCL_HI),
+    Temp_Model = sprintf("%.3f (%.3f–%.3f)", IRR_Temp, LCL_Temp, UCL_Temp)
+  )
+
+# Display comparison table
+comparison_hi_vs_temp %>%
+  dplyr::select(City = city, `Crime Type` = outcome, `Heat Category` = hi_level, 
+                `Heat Index Model IRR (95% CI)` = HI_Model, 
+                `Temperature Model IRR (95% CI)` = Temp_Model) %>%
+  kable(
+    format = "html",
+    caption = "Sensitivity Analysis: Comparison of Heat Index vs Maximum Temperature Models"
+  ) %>%
+  kable_styling(
+    bootstrap_options = c("striped", "condensed"),
+    full_width = FALSE
+  ) %>%
+  collapse_rows(columns = 1:2, valign = "top")
+
+# Save comparison
+readr::write_csv(comparison_hi_vs_temp, "sensitivity_analysis_HI_vs_Temp.csv")
+
+## Visualize Temperature Model Results
+y_min_temp <- min(irr_all_temp$LCL, na.rm = TRUE) * 0.95
+y_max_temp <- max(irr_all_temp$UCL, na.rm = TRUE) * 1.05
+
+p_temp_model <- ggplot2::ggplot(
+  irr_all_temp,
+  ggplot2::aes(
+    x = hi_level, y = IRR, ymin = LCL, ymax = UCL,
+    shape = outcome, linetype = outcome, color = outcome
+  )
+) +
+  ggplot2::geom_hline(yintercept = 1, linetype = 2, color = "grey50") +
+  ggplot2::geom_pointrange(
+    position = ggplot2::position_dodge(width = 0.45),
+    size = 1.2,      
+    fatten = 7       
+  ) +
+  ggplot2::facet_wrap(~ city, ncol = 2) +
+  ggplot2::scale_y_log10(limits = c(y_min_temp, y_max_temp)) +
+  ggplot2::scale_color_manual(
+    values = c(
+      "Total"       = "#440154",
+      "Violent"     = "#31688e",
+      "Non-Violent" = "#35b779"
+    ),
+    name = "Crime Type"
+  ) +
+  ggplot2::scale_shape_manual(
+    values = c("Total" = 16, "Violent" = 17, "Non-Violent" = 15),
+    name = "Crime Type"
+  ) +
+  ggplot2::scale_linetype_discrete(name = "Crime Type") +
+  ggplot2::labs(
+    title = "IRRs Using Daily Maximum Temperature (Sensitivity Analysis)",
+    y = "Incidence Rate Ratio",
+    x = "Temperature Category (vs <85th percentile)"
+  ) +
+  ggplot2::theme_minimal(base_size = 12) +
+  ggplot2::theme(
+    panel.grid.minor = ggplot2::element_blank(),
+    legend.position = "top",
+    strip.background = ggplot2::element_rect(fill = "grey90", color = NA),
+    strip.text = ggplot2::element_text(size = 12, face = "bold"),
+    axis.title.x = ggplot2::element_text(size = 14),
+    axis.text.x  = ggplot2::element_text(size = 13, angle = 20, hjust = 1),
+    axis.title.y = ggplot2::element_text(size = 14),
+    axis.text.y  = ggplot2::element_text(size = 12)
+  )
+
+print(p_temp_model)
+
+# Save temperature model figure
+ggplot2::ggsave(
+  filename = "Sensitivity_Temperature_Model.png",
+  plot     = p_temp_model,
+  width    = 10,
+  height   = 6,
+  units    = "in",
+  dpi      = 300
+)
+
+## Summary Statistics
+cat("\n=== SENSITIVITY ANALYSIS: TEMPERATURE VS HEAT INDEX ===\n\n")
+cat("Temperature Thresholds:\n")
+print(temp_thresholds)
+cat("\nMissing Temperature values:", sum(is.na(crime_daily_temp$temp_max_f)), "\n")
+cat("Date range:", min(crime_daily_temp$crime_date, na.rm = TRUE), "to",
+    max(crime_daily_temp$crime_date, na.rm = TRUE), "\n\n")
+```
