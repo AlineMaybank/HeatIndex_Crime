@@ -1,0 +1,434 @@
+---
+title: "a_04_2025_crimedata"
+author: "Aline Maybank"
+date: "2026-02-09"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+In this script, I am exploring if I can feasibility incorporate 2025 crime data for Baltimore and DC into my Temperature x Crime study.
+
+
+Install Packages
+```{r, results='hide', message=FALSE, warning=FALSE}
+library(dplyr)
+library(tidyr)
+library(knitr)
+library(kableExtra)
+library(tidycensus)
+library(sf)
+library(ggplot2)
+library(stringr)
+library(forcats)
+library(scales)
+library(sf)
+library(patchwork)
+```
+
+
+# Incorporate 2025 Crime Data
+
+### Baltimore
+
+Baltimore crime data for 2025 is more complex because Baltimore changed the way that they categorize and report crime.
+
+Carla's information (from an email sent to me on Jan 31):
+- Baltimore switched in 2025 to reporting their data in alignment with NIBRS. It can be found here: https://data.baltimorecity.gov/datasets/204beefe92a645d79fdf0969957bbdf8_0/explore?location=39.288065%2C-76.625846%2C10
+
+ 
+- Homicides are coded the same but nonfatal shootings are coded differently. Here is a paper that talks about it a little bit: https://www.tandfonline.com/doi/abs/10.1080/0735648X.2025.2461515
+
+ 
+- It looks like Baltimore created an additional variable labeled “shooting” that seems to be defining what is actually a nonfatal shooting vs. aggravated assault w a gun, but I haven’t actually used this data yet. I would be cautious in using it longitudinally with data prior to 2025 and recommend you cross reference various numbers publicized about the number of shootings to ensure you are capturing what you want to capture.
+
+
+
+### DC
+DC crime data for 2025 is publicly available in the same style as previous years (2020-2024) on the same link: https://opendata.dc.gov/datasets/DCGIS::crime-incidents-in-2025
+
+So, integrating of 2025 crime data for DC is easy and I just need to process the crime data like how I did for all the other years in the scripts of "Report_2025_Crimes_Baltimore.Rmd"
+
+
+
+# Data Cleaning
+
+### Baltimore 2025 Data
+I need to read in the dataset for 2025 crime data with the new definitions and explore it, and also see how previous years in the newly defined data file compare to our crime trends in previous years in our version of data cleaning of previous datasets (e.g., data cleaned in the files "Report_202X_Crimes_Baltimore.Rmd").
+
+
+## DC 2025 Data
+The DC 2025 data is cleaned in the script called "Report_2025_Crimes_DC.Rmd".
+
+
+
+# Data Visualization
+
+### Baltimore
+--> Feb 2, 2026: I can’t use 2025 crime data in this study because Baltimore re-categorized theirs (--> difficult/sketchy to use in a longitudinal analysis
+
+
+
+
+### DC
+# Re-make the crime count and bar graph figures with the 2025 year 
+(I already made these graphs for 2020-2024 crime in DC)
+
+
+1. Read in other years DC crime datasets (2020-2024)
+```{r}
+
+# These scripts (2020-2024) were cleaned for the Dignified Grocery Access project
+DC_allcrimes_2020_clean <- read.csv("/Users/aline.maybank/Desktop/Crime x Grocery/Data/Output/2025-10-27_DC_allcrimes_2020_clean_flat.csv")
+
+DC_allcrimes_2021_clean <- read.csv("/Users/aline.maybank/Desktop/Crime x Grocery/Data/Output/2025-10-27_DC_allcrimes_2021_clean_flat.csv")
+
+DC_allcrimes_2022_clean <- read.csv("/Users/aline.maybank/Desktop/Crime x Grocery/Data/Output/2025-10-27_DC_allcrimes_2022_clean_flat.csv")
+
+DC_allcrimes_2023_clean <- read.csv("/Users/aline.maybank/Desktop/Crime x Grocery/Data/Output/2025-10-27_DC_allcrimes_2023_clean_flat.csv")
+
+DC_allcrimes_2024_clean <- read.csv("/Users/aline.maybank/Desktop/Crime x Grocery/Data/Output/2025-10-27_DC_allcrimes_2024_clean_flat.csv")
+
+# This data file was specifically cleaned for the Temperature x Crime project
+DC_allcrimes_2025_clean <- read.csv("2026-02-02_DC_allcrimes_2025_clean_flat.csv")
+```
+
+2. DC: Total counts of crime in the city per year
+```{r}
+cat("DC 2020:", nrow(DC_allcrimes_2020_clean), "crimes\n")
+cat("DC 2021:", nrow(DC_allcrimes_2021_clean), "crimes\n")
+cat("DC 2022:", nrow(DC_allcrimes_2022_clean), "crimes\n")
+cat("DC 2023:", nrow(DC_allcrimes_2023_clean), "crimes\n")
+cat("DC 2024:", nrow(DC_allcrimes_2024_clean), "crimes\n")
+cat("DC 2025:", nrow(DC_allcrimes_2025_clean), "crimes\n")
+```
+
+3. DC: Collect unique offense values across all DC years 
+```{r}
+# Collect unique offense values across all DC years
+dc_descriptions <- c(
+  unique(DC_allcrimes_2020_clean$OFFENSE),
+  unique(DC_allcrimes_2021_clean$OFFENSE),
+  unique(DC_allcrimes_2022_clean$OFFENSE),
+  unique(DC_allcrimes_2023_clean$OFFENSE),
+  unique(DC_allcrimes_2024_clean$OFFENSE),
+  unique(DC_allcrimes_2025_clean$OFFENSE)
+) %>%
+  unique() %>%
+  sort()
+
+# Print them out
+print(dc_descriptions)
+
+# Explicit mapping for DC offenses
+map_dc <- c(
+  "ARSON"                         = "Non-Violent",
+  "ASSAULT W/DANGEROUS WEAPON"    = "Violent",
+  "HOMICIDE"                      = "Violent",
+  "ROBBERY"                       = "Violent",
+  "SEX ABUSE"                     = "Violent",
+  "BURGLARY"                      = "Non-Violent",
+  "MOTOR VEHICLE THEFT"           = "Non-Violent",
+  "THEFT/OTHER"                   = "Non-Violent",
+  "THEFT F/AUTO"                  = "Non-Violent"
+)
+
+# 2020
+DC_allcrimes_2020_clean_flat <- DC_allcrimes_2020_clean %>%
+  mutate(offense_clean = toupper(trimws(OFFENSE)),
+         crime_type = recode(offense_clean, !!!map_dc, .default = "Non-Violent"))
+
+# 2021
+DC_allcrimes_2021_clean_flat <- DC_allcrimes_2021_clean %>%
+  mutate(offense_clean = toupper(trimws(OFFENSE)),
+         crime_type = recode(offense_clean, !!!map_dc, .default = "Non-Violent"))
+
+# 2022
+DC_allcrimes_2022_clean_flat <- DC_allcrimes_2022_clean %>%
+  mutate(offense_clean = toupper(trimws(OFFENSE)),
+         crime_type = recode(offense_clean, !!!map_dc, .default = "Non-Violent"))
+
+# 2023
+DC_allcrimes_2023_clean_flat <- DC_allcrimes_2023_clean %>%
+  mutate(offense_clean = toupper(trimws(OFFENSE)),
+         crime_type = recode(offense_clean, !!!map_dc, .default = "Non-Violent"))
+
+# 2024
+DC_allcrimes_2024_clean_flat <- DC_allcrimes_2024_clean %>%
+  mutate(offense_clean = toupper(trimws(OFFENSE)),
+         crime_type = recode(offense_clean, !!!map_dc, .default = "Non-Violent"))
+
+# 2025
+DC_allcrimes_2025_clean_flat <- DC_allcrimes_2025_clean %>%
+  mutate(offense_clean = toupper(trimws(OFFENSE)),
+         crime_type = recode(offense_clean, !!!map_dc, .default = "Non-Violent"))
+
+```
+
+
+4. Make individual maps of crime incidents for DC (2020-2025)
+```{r}
+# 1. Get census basemap for DC
+DC_census_data <- get_acs(
+  geography = "tract",
+  variables = c(non_hisp_white_population = "B03002_003"),
+  state = "DC",
+  year = 2023,
+  survey = "acs5",
+  geometry = TRUE
+)
+
+# 2. Convert each year’s crime CSV into sf object
+DC_allcrimes_2020_clean_flat_sf <- st_as_sf(DC_allcrimes_2020_clean_flat,
+  coords = c("longitude", "latitude"), crs = 4326, remove = FALSE) |> 
+  st_transform(st_crs(DC_census_data))
+
+DC_allcrimes_2021_clean_flat_sf <- st_as_sf(DC_allcrimes_2021_clean_flat,
+  coords = c("longitude", "latitude"), crs = 4326, remove = FALSE) |> 
+  st_transform(st_crs(DC_census_data))
+
+DC_allcrimes_2022_clean_flat_sf <- st_as_sf(DC_allcrimes_2022_clean_flat,
+  coords = c("longitude", "latitude"), crs = 4326, remove = FALSE) |> 
+  st_transform(st_crs(DC_census_data))
+
+DC_allcrimes_2023_clean_flat_sf <- st_as_sf(DC_allcrimes_2023_clean_flat,
+  coords = c("longitude", "latitude"), crs = 4326, remove = FALSE) |> 
+  st_transform(st_crs(DC_census_data))
+
+DC_allcrimes_2024_clean_flat_sf <- st_as_sf(DC_allcrimes_2024_clean_flat,
+  coords = c("longitude", "latitude"), crs = 4326, remove = FALSE) |> 
+  st_transform(st_crs(DC_census_data))
+
+DC_allcrimes_2025_clean_flat_sf <- st_as_sf(DC_allcrimes_2025_clean_flat,
+  coords = c("longitude", "latitude"), crs = 4326, remove = FALSE) |> 
+  st_transform(st_crs(DC_census_data))
+
+# 3. Maps - DC
+DC_crimes_2020_red <- ggplot() +
+  geom_sf(data = DC_census_data, color = "grey60", fill = NA, linewidth = 0.2) +
+  geom_sf(data = DC_allcrimes_2020_clean_flat_sf,
+          color = "red", size = 0.3, alpha = 0.05) +
+  labs(title = "2020 Crimes in Washington, D.C.") +
+  theme_bw() +
+  theme(
+    panel.grid = element_blank()   # <- removes grid lines
+  )
+
+DC_crimes_2021_red <- ggplot() +
+  geom_sf(data = DC_census_data, color = "grey60", fill = NA, linewidth = 0.2) +
+  geom_sf(data = DC_allcrimes_2021_clean_flat_sf,
+          color = "red", size = 0.3, alpha = 0.05) +
+  labs(title = "2021 Crimes in Washington, D.C.") +
+  theme_bw() +
+  theme(
+    panel.grid = element_blank()
+  )
+
+DC_crimes_2022_red <- ggplot() +
+  geom_sf(data = DC_census_data, color = "grey60", fill = NA, linewidth = 0.2) +
+  geom_sf(data = DC_allcrimes_2022_clean_flat_sf,
+          color = "red", size = 0.3, alpha = 0.05) +
+  labs(title = "2022 Crimes in Washington, D.C.") +
+  theme_bw() +
+  theme(
+    panel.grid = element_blank()
+  )
+
+DC_crimes_2023_red <- ggplot() +
+  geom_sf(data = DC_census_data, color = "grey60", fill = NA, linewidth = 0.2) +
+  geom_sf(data = DC_allcrimes_2023_clean_flat_sf,
+          color = "red", size = 0.3, alpha = 0.05) +
+  labs(title = "2023 Crimes in Washington, D.C.") +
+  theme_bw() +
+  theme(
+    panel.grid = element_blank()
+  )
+
+DC_crimes_2024_red <- ggplot() +
+  geom_sf(data = DC_census_data, color = "grey60", fill = NA, linewidth = 0.2) +
+  geom_sf(data = DC_allcrimes_2024_clean_flat_sf,
+          color = "red", size = 0.3, alpha = 0.05) +
+  labs(title = "2024 Crimes in Washington, D.C.") +
+  theme_bw() +
+  theme(
+    panel.grid = element_blank()
+  )
+
+DC_crimes_2025_red <- ggplot() +
+  geom_sf(data = DC_census_data, color = "grey60", fill = NA, linewidth = 0.2) +
+  geom_sf(data = DC_allcrimes_2025_clean_flat_sf,
+          color = "red", size = 0.3, alpha = 0.05) +
+  labs(title = "2025 Crimes in Washington, D.C.") +
+  theme_bw() +
+  theme(
+    panel.grid = element_blank()
+  )
+
+# Save all six panels
+ggsave("DC_crimes_2020_red.png", plot = DC_crimes_2020_red, width = 6, height = 6, dpi = 300)
+ggsave("DC_crimes_2021_red.png", plot = DC_crimes_2021_red, width = 6, height = 6, dpi = 300)
+ggsave("DC_crimes_2022_red.png", plot = DC_crimes_2022_red, width = 6, height = 6, dpi = 300)
+ggsave("DC_crimes_2023_red.png", plot = DC_crimes_2023_red, width = 6, height = 6, dpi = 300)
+ggsave("DC_crimes_2024_red.png", plot = DC_crimes_2024_red, width = 6, height = 6, dpi = 300)
+ggsave("DC_crimes_2025_red.png", plot = DC_crimes_2025_red, width = 6, height = 6, dpi = 300)
+
+```
+
+
+5. Code to make the multi-panel figure map of crime incidents in DC (2020-2025)
+```{r}
+# 1) City-specific extents (so each row shares one bbox)
+dc_bbox   <- st_bbox(DC_census_data)
+
+fix_panel <- function(p, bbox){
+  p +
+    coord_sf(
+      xlim = c(bbox["xmin"], bbox["xmax"]),
+      ylim = c(bbox["ymin"], bbox["ymax"]),
+      expand = FALSE, datum = NA
+    ) +
+    theme_void(base_size = 11) +
+    theme(
+      panel.border = element_rect(color = "grey80", fill = NA, linewidth = 0.5),
+      plot.title   = element_blank(),
+      plot.margin  = margin(2, 2, 2, 2)
+    )
+}
+
+# Small-map rows (no titles inside)
+
+dc_row <- wrap_plots(
+  fix_panel(DC_crimes_2020_red, dc_bbox),
+  fix_panel(DC_crimes_2021_red, dc_bbox),
+  fix_panel(DC_crimes_2022_red, dc_bbox),
+  fix_panel(DC_crimes_2023_red, dc_bbox),
+  fix_panel(DC_crimes_2024_red, dc_bbox),
+  fix_panel(DC_crimes_2025_red, dc_bbox),
+  nrow = 1
+)
+
+# 2) Single full-width headers (one for each row)
+title_row <- function(txt, size = 18){
+  ggplot() +
+    annotate("text", x = 0.5, y = 0.5, label = txt,
+             fontface = "bold", size = size/3) +
+    theme_void() +
+    theme(plot.margin = margin(0,0,2,0))
+}
+
+dc_header <- title_row("Washington, D.C.", size = 18)
+
+# 4) Year labels row (6 labels)
+years_vec <- 2020:2025
+year_row <- wrap_plots(
+  lapply(years_vec, function(y){
+    ggplot() +
+      annotate("text", x = 0.5, y = 0.5, label = y, size = 6) +
+      theme_void()
+  }),
+  nrow = 1
+)
+
+# 4) Stack: header → maps → header → maps → years
+final_grid <- dc_header / dc_row / year_row +
+  plot_layout(heights = c(0.12, 1, 0.15))
+
+final_grid
+
+# 5) Save
+ggsave("crime_maps_dc_2020_2025.png", plot = final_grid, width = 14, height = 4.5, dpi = 300)
+```
+
+6. Code to make the crime count bar graph of crime incidents by violent and non-violent (2020-2025)
+```{r}
+# DC ONLY (2020–2025):
+# 1) Stacked bar (Violent vs Non-Violent) with % violent labels
+# 2) Table with counts + percentages by year
+
+pal <- c("Violent" = "#FDB863", "Non-Violent" = "#133E7C")
+
+# helper: standardize year + crime_type
+mk_dc <- function(df, yr) {
+  df %>%
+    transmute(
+      city = "Washington, D.C.",
+      year = factor(yr, levels = as.character(2020:2025)),
+      crime_type = factor(crime_type, levels = c("Violent", "Non-Violent"))
+    )
+}
+
+# 0) Build DC-only long data (2020–2025)
+dc_all_crime <- bind_rows(
+  mk_dc(DC_allcrimes_2020_clean_flat, 2020),
+  mk_dc(DC_allcrimes_2021_clean_flat, 2021),
+  mk_dc(DC_allcrimes_2022_clean_flat, 2022),
+  mk_dc(DC_allcrimes_2023_clean_flat, 2023),
+  mk_dc(DC_allcrimes_2024_clean_flat, 2024),
+  mk_dc(DC_allcrimes_2025_clean_flat, 2025)
+)
+
+# quick sanity checks
+print(table(dc_all_crime$year, useNA = "ifany"))
+print(table(dc_all_crime$crime_type, useNA = "ifany"))
+
+# 1) Counts by year + crime type (DC only)
+by_dc_counts <- dc_all_crime %>%
+  filter(!is.na(crime_type)) %>%
+  count(year, crime_type, name = "incidents", .drop = FALSE)
+
+# % violent labels for the plot
+dc_labels <- by_dc_counts %>%
+  tidyr::pivot_wider(names_from = crime_type, values_from = incidents, values_fill = 0) %>%
+  mutate(
+    total       = `Violent` + `Non-Violent`,
+    pct_violent = dplyr::if_else(total > 0, `Violent` / total, NA_real_),
+    label       = scales::percent(pct_violent, accuracy = 1),
+    y_pos       = total - (0.03 * total)
+  )
+
+# 2) Plot: DC stacked bar with % violent label
+p_dc_counts <- ggplot(by_dc_counts, aes(x = year, y = incidents, fill = crime_type)) +
+  geom_col(position = "stack") +
+  geom_text(
+    data = dc_labels,
+    aes(x = year, y = y_pos, label = label),
+    inherit.aes = FALSE,
+    fontface = "bold", size = 3.3, color = "white", na.rm = TRUE
+  ) +
+  scale_fill_manual(values = pal, breaks = c("Violent", "Non-Violent"), name = "Crime type") +
+  labs(
+    title = "Total Crime Incidents — Washington, D.C. (2020–2025)",
+    x = "Year", y = "Incidents"
+  ) +
+  theme_classic()
+
+p_dc_counts
+
+ggsave("dc_stacked_bar_2020_2025.png", plot = p_dc_counts, width = 7, height = 4.5, dpi = 300)
+
+# 3) Table: counts + percentages by year (DC only)
+dc_counts_table <- by_dc_counts %>%
+  tidyr::pivot_wider(
+    names_from = crime_type,
+    values_from = incidents,
+    values_fill = 0
+  ) %>%
+  mutate(
+    Total = Violent + `Non-Violent`,
+    `Violent %`     = scales::percent(ifelse(Total > 0, Violent / Total, NA_real_), accuracy = 0.1),
+    `Non-Violent %` = scales::percent(ifelse(Total > 0, `Non-Violent` / Total, NA_real_), accuracy = 0.1)
+  ) %>%
+  arrange(as.integer(as.character(year)))
+
+dc_counts_table %>%
+  knitr::kable(
+    "html",
+    caption = "Washington, D.C.: Counts of violent and non-violent crimes by year (2020–2025)"
+  ) %>%
+  kableExtra::kable_styling(
+    bootstrap_options = c("striped", "condensed"),
+    full_width = FALSE
+  )
+```

@@ -1,0 +1,503 @@
+---
+title: "a_01_ExploreCrimeData"
+author: "Aline Maybank"
+date: "2026-02-09"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Setting Up
+
+Load Libraries
+```{r, message=FALSE, warning=FALSE, results='hide'}
+library(dplyr)
+library(tidyr)
+library(knitr)
+library(kableExtra)
+library(tidycensus)
+library(sf)
+library(ggplot2)
+library(stringr)
+```
+
+
+# Load Data
+
+## Crime Data
+Baltimore crime data from 2020-2024
+This data is pre-cleaned from the Grocery x Crime project
+```{r}
+Baltimore_allcrimes_2020_clean_flat <- read.csv("Crime_Data/2025-10-07_Baltimore_allcrimes_2020_clean_flat.csv")
+Baltimore_allcrimes_2021_clean_flat <- read.csv("Crime_Data/2025-10-07_Baltimore_allcrimes_2021_clean_flat.csv")
+Baltimore_allcrimes_2022_clean_flat <- read.csv("Crime_Data/2025-10-07_Baltimore_allcrimes_2022_clean_flat.csv")
+Baltimore_allcrimes_2023_clean_flat <- read.csv("Crime_Data/2025-10-07_Baltimore_allcrimes_2023_clean_flat.csv")
+Baltimore_allcrimes_2024_clean_flat <- read.csv("Crime_Data/2025-10-07_Baltimore_allcrimes_2024_clean_flat.csv")
+```
+
+DC crime data from 2020-2024
+This data is pre-cleaned from the Grocery x Crime project
+```{r}
+DC_allcrimes_2020_clean_flat <- read.csv("Crime_Data/2025-10-07_DC_allcrimes_2020_clean_flat.csv")
+DC_allcrimes_2021_clean_flat <- read.csv("Crime_Data/2025-10-07_DC_allcrimes_2021_clean_flat.csv")
+DC_allcrimes_2022_clean_flat <- read.csv("Crime_Data/2025-10-07_DC_allcrimes_2022_clean_flat.csv")
+DC_allcrimes_2023_clean_flat <- read.csv("Crime_Data/2025-10-07_DC_allcrimes_2023_clean_flat.csv")
+DC_allcrimes_2024_clean_flat <- read.csv("Crime_Data/2025-10-07_DC_allcrimes_2024_clean_flat.csv")
+```
+
+# Explore Datasets
+
+## Counts of crime
+
+Baltimore: Total counts of crime
+```{r, message=FALSE, warning=FALSE, results='hide'}
+cat("Baltimore 2020:", nrow(Baltimore_allcrimes_2020_clean_flat), "crimes\n")
+cat("Baltimore 2021:", nrow(Baltimore_allcrimes_2021_clean_flat), "crimes\n")
+cat("Baltimore 2022:", nrow(Baltimore_allcrimes_2022_clean_flat), "crimes\n")
+cat("Baltimore 2023:", nrow(Baltimore_allcrimes_2023_clean_flat), "crimes\n")
+cat("Baltimore 2024:", nrow(Baltimore_allcrimes_2024_clean_flat), "crimes\n")
+```
+
+
+DC: Total counts of crime
+```{r, message=FALSE, warning=FALSE, results='hide'}
+cat("DC 2020:", nrow(DC_allcrimes_2020_clean_flat), "crimes\n")
+cat("DC 2021:", nrow(DC_allcrimes_2021_clean_flat), "crimes\n")
+cat("DC 2022:", nrow(DC_allcrimes_2022_clean_flat), "crimes\n")
+cat("DC 2023:", nrow(DC_allcrimes_2023_clean_flat), "crimes\n")
+cat("DC 2024:", nrow(DC_allcrimes_2024_clean_flat), "crimes\n")
+```
+
+
+Summary table of year × city × total crime count
+```{r}
+# Long table (same as before)
+crime_counts_long <- tibble::tibble(
+  city = rep(c("Baltimore", "DC"), each = 5),
+  year = rep(2020:2024, times = 2),
+  incidents = c(
+    nrow(Baltimore_allcrimes_2020_clean_flat),
+    nrow(Baltimore_allcrimes_2021_clean_flat),
+    nrow(Baltimore_allcrimes_2022_clean_flat),
+    nrow(Baltimore_allcrimes_2023_clean_flat),
+    nrow(Baltimore_allcrimes_2024_clean_flat),
+    nrow(DC_allcrimes_2020_clean_flat),
+    nrow(DC_allcrimes_2021_clean_flat),
+    nrow(DC_allcrimes_2022_clean_flat),
+    nrow(DC_allcrimes_2023_clean_flat),
+    nrow(DC_allcrimes_2024_clean_flat)
+  )
+)
+
+# Wide table + total
+crime_counts_wide <- crime_counts_long %>%
+  pivot_wider(names_from = city, values_from = incidents) %>%
+  arrange(year) %>%
+  mutate(Total = rowSums(dplyr::select(., Baltimore, DC), na.rm = TRUE))
+
+# Print kables
+crime_counts_long %>%
+  arrange(city, year) %>%
+  kable("html", caption = "Crime Incidents by City and Year (Long)") %>%
+  kable_styling(bootstrap_options = c("striped", "condensed"), full_width = FALSE)
+
+crime_counts_wide %>%
+  kable("html", caption = "Crime Incidents by Year (Baltimore vs DC)") %>%
+  kable_styling(bootstrap_options = c("striped", "condensed"), full_width = FALSE)
+```
+
+## Define Violent vs Non-Violent Crimes
+Baltimore
+```{r}
+# Collect unique Description values across all Baltimore years
+baltimore_descriptions <- c(
+  unique(Baltimore_allcrimes_2020_clean_flat$Descriptio),
+  unique(Baltimore_allcrimes_2021_clean_flat$Descriptio),
+  unique(Baltimore_allcrimes_2022_clean_flat$Descriptio),
+  unique(Baltimore_allcrimes_2023_clean_flat$Descriptio),
+  unique(Baltimore_allcrimes_2024_clean_flat$Descriptio)
+) %>%
+  unique() %>%
+  sort()
+
+print(baltimore_descriptions)
+
+# Explicit mapping for Baltimore descriptions
+map_baltimore <- c(
+  "AGG. ASSAULT"          = "Violent",
+  "ARSON"                 = "Non-Violent",
+  "AUTO THEFT"            = "Non-Violent",
+  "BURGLARY"              = "Non-Violent",
+  "COMMON ASSAULT"        = "Non-Violent",
+  "HOMICIDE"              = "Violent",
+  "LARCENY"               = "Non-Violent",
+  "LARCENY FROM AUTO"     = "Non-Violent",
+  "RAPE"                  = "Violent",
+  "ROBBERY"               = "Violent",
+  "ROBBERY - CARJACKING"  = "Violent",
+  "ROBBERY - COMMERCIAL"  = "Violent",
+  "SHOOTING"              = "Violent"
+)
+
+# 2020
+Baltimore_allcrimes_2020_clean_flat <- Baltimore_allcrimes_2020_clean_flat %>%
+  mutate(Descriptio_clean = toupper(trimws(Descriptio)),
+         crime_type = recode(Descriptio_clean, !!!map_baltimore, .default = "Non-Violent"))
+
+# 2021
+Baltimore_allcrimes_2021_clean_flat <- Baltimore_allcrimes_2021_clean_flat %>%
+  mutate(Descriptio_clean = toupper(trimws(Descriptio)),
+         crime_type = recode(Descriptio_clean, !!!map_baltimore, .default = "Non-Violent"))
+
+# 2022
+Baltimore_allcrimes_2022_clean_flat <- Baltimore_allcrimes_2022_clean_flat %>%
+  mutate(Descriptio_clean = toupper(trimws(Descriptio)),
+         crime_type = recode(Descriptio_clean, !!!map_baltimore, .default = "Non-Violent"))
+
+# 2023
+Baltimore_allcrimes_2023_clean_flat <- Baltimore_allcrimes_2023_clean_flat %>%
+  mutate(Descriptio_clean = toupper(trimws(Descriptio)),
+         crime_type = recode(Descriptio_clean, !!!map_baltimore, .default = "Non-Violent"))
+
+# 2024
+Baltimore_allcrimes_2024_clean_flat <- Baltimore_allcrimes_2024_clean_flat %>%
+  mutate(Descriptio_clean = toupper(trimws(Descriptio)),
+         crime_type = recode(Descriptio_clean, !!!map_baltimore, .default = "Non-Violent"))
+```
+
+DC
+```{r}
+# Collect unique offense values across all DC years
+dc_descriptions <- c(
+  unique(DC_allcrimes_2020_clean_flat$OFFENSE),
+  unique(DC_allcrimes_2021_clean_flat$OFFENSE),
+  unique(DC_allcrimes_2022_clean_flat$OFFENSE),
+  unique(DC_allcrimes_2023_clean_flat$OFFENSE),
+  unique(DC_allcrimes_2024_clean_flat$OFFENSE)
+) %>%
+  unique() %>%
+  sort()
+
+# Print them out
+print(dc_descriptions)
+
+# Explicit mapping for DC offenses
+map_dc <- c(
+  "ARSON"                         = "Non-Violent",
+  "ASSAULT W/DANGEROUS WEAPON"    = "Violent",
+  "HOMICIDE"                      = "Violent",
+  "ROBBERY"                       = "Violent",
+  "SEX ABUSE"                     = "Violent",
+  "BURGLARY"                      = "Non-Violent",
+  "MOTOR VEHICLE THEFT"           = "Non-Violent",
+  "THEFT/OTHER"                   = "Non-Violent",
+  "THEFT F/AUTO"                  = "Non-Violent"
+)
+
+# 2020
+DC_allcrimes_2020_clean_flat <- DC_allcrimes_2020_clean_flat %>%
+  mutate(offense_clean = toupper(trimws(OFFENSE)),
+         crime_type = recode(offense_clean, !!!map_dc, .default = "Non-Violent"))
+
+# 2021
+DC_allcrimes_2021_clean_flat <- DC_allcrimes_2021_clean_flat %>%
+  mutate(offense_clean = toupper(trimws(OFFENSE)),
+         crime_type = recode(offense_clean, !!!map_dc, .default = "Non-Violent"))
+
+# 2022
+DC_allcrimes_2022_clean_flat <- DC_allcrimes_2022_clean_flat %>%
+  mutate(offense_clean = toupper(trimws(OFFENSE)),
+         crime_type = recode(offense_clean, !!!map_dc, .default = "Non-Violent"))
+
+# 2023
+DC_allcrimes_2023_clean_flat <- DC_allcrimes_2023_clean_flat %>%
+  mutate(offense_clean = toupper(trimws(OFFENSE)),
+         crime_type = recode(offense_clean, !!!map_dc, .default = "Non-Violent"))
+
+# 2024
+DC_allcrimes_2024_clean_flat <- DC_allcrimes_2024_clean_flat %>%
+  mutate(offense_clean = toupper(trimws(OFFENSE)),
+         crime_type = recode(offense_clean, !!!map_dc, .default = "Non-Violent"))
+```
+
+## Maps of Crime
+Creating maps of the total cleaned crime for 2020, 2021, 2022, 2023, and 2024
+
+Baltimore
+Maps of crimes for 2020-2024
+```{r}
+# 1. Get census basemap for Baltimore City
+options(tigris_use_cache = TRUE)
+
+Balt_census_data <- get_acs(
+  geography = "tract",
+  variables = c(non_hisp_white_population = "B03002_003"),
+  state = "MD",
+  county = "Baltimore city",
+  year = 2023,
+  survey = "acs5",
+  geometry = TRUE
+)
+
+# 2. Convert each year’s crime CSV into sf object
+Baltimore_allcrimes_2020_clean_flat_sf <- st_as_sf(Baltimore_allcrimes_2020_clean_flat,
+  coords = c("longitude", "latitude"), crs = 4326, remove = FALSE) |> 
+  st_transform(st_crs(Balt_census_data))
+
+Baltimore_allcrimes_2021_clean_flat_sf <- st_as_sf(Baltimore_allcrimes_2021_clean_flat,
+  coords = c("longitude", "latitude"), crs = 4326, remove = FALSE) |> 
+  st_transform(st_crs(Balt_census_data))
+
+Baltimore_allcrimes_2022_clean_flat_sf <- st_as_sf(Baltimore_allcrimes_2022_clean_flat,
+  coords = c("longitude", "latitude"), crs = 4326, remove = FALSE) |> 
+  st_transform(st_crs(Balt_census_data))
+
+Baltimore_allcrimes_2023_clean_flat_sf <- st_as_sf(Baltimore_allcrimes_2023_clean_flat,
+  coords = c("longitude", "latitude"), crs = 4326, remove = FALSE) |> 
+  st_transform(st_crs(Balt_census_data))
+
+Baltimore_allcrimes_2024_clean_flat_sf <- st_as_sf(Baltimore_allcrimes_2024_clean_flat,
+  coords = c("longitude", "latitude"), crs = 4326, remove = FALSE) |> 
+  st_transform(st_crs(Balt_census_data))
+
+# 3. Maps
+Baltimore_crimes_2020_red <- ggplot() +
+  geom_sf(data = Balt_census_data, color = "grey60", fill = NA, linewidth = 0.2) +
+  geom_sf(data = Baltimore_allcrimes_2020_clean_flat_sf,
+          color = "red", size = 0.3, alpha = 0.1) +
+  labs(title = "2020 Crimes in Baltimore") +
+  theme_bw() +
+  theme(
+    panel.grid = element_blank()   # <- removes grid lines
+  )
+
+Baltimore_crimes_2021_red <- ggplot() +
+  geom_sf(data = Balt_census_data, color = "grey60", fill = NA, linewidth = 0.2) +
+  geom_sf(data = Baltimore_allcrimes_2021_clean_flat_sf,
+          color = "red", size = 0.3, alpha = 0.1) +
+  labs(title = "2021 Crimes in Baltimore") +
+  theme_bw() +
+  theme(
+    panel.grid = element_blank()   # <- removes grid lines
+  )
+
+Baltimore_crimes_2022_red <- ggplot() +
+  geom_sf(data = Balt_census_data, color = "grey60", fill = NA, linewidth = 0.2) +
+  geom_sf(data = Baltimore_allcrimes_2022_clean_flat_sf,
+          color = "red", size = 0.3, alpha = 0.1) +
+  labs(title = "2022 Crimes in Baltimore") +
+  theme_bw() +
+  theme(
+    panel.grid = element_blank()   # <- removes grid lines
+  )
+
+Baltimore_crimes_2023_red <- ggplot() +
+  geom_sf(data = Balt_census_data, color = "grey60", fill = NA, linewidth = 0.2) +
+  geom_sf(data = Baltimore_allcrimes_2023_clean_flat_sf,
+          color = "red", size = 0.3, alpha = 0.1) +
+  labs(title = "2023 Crimes in Baltimore") +
+  theme_bw() +
+  theme(
+    panel.grid = element_blank()   # <- removes grid lines
+  )
+
+Baltimore_crimes_2024_red <- ggplot() +
+  geom_sf(data = Balt_census_data, color = "grey60", fill = NA, linewidth = 0.2) +
+  geom_sf(data = Baltimore_allcrimes_2024_clean_flat_sf,
+          color = "red", size = 0.3, alpha = 0.1) +
+  labs(title = "2024 Crimes in Baltimore") +
+  theme_bw() +
+  theme(
+    panel.grid = element_blank()   # <- removes grid lines
+  )
+
+# Print one to check
+print(Baltimore_crimes_2020_red)
+
+# Save them
+# Save all five
+ggsave("Baltimore_crimes_2020_red.png", plot = Baltimore_crimes_2020_red, width = 6, height = 6, dpi = 300)
+ggsave("Baltimore_crimes_2021_red.png", plot = Baltimore_crimes_2021_red, width = 6, height = 6, dpi = 300)
+ggsave("Baltimore_crimes_2022_red.png", plot = Baltimore_crimes_2022_red, width = 6, height = 6, dpi = 300)
+ggsave("Baltimore_crimes_2023_red.png", plot = Baltimore_crimes_2023_red, width = 6, height = 6, dpi = 300)
+ggsave("Baltimore_crimes_2024_red.png", plot = Baltimore_crimes_2024_red, width = 6, height = 6, dpi = 300)
+```
+
+DC
+Maps of crimes for 2020-2024
+```{r}
+# 1. Get census basemap for DC
+DC_census_data <- get_acs(
+  geography = "tract",
+  variables = c(non_hisp_white_population = "B03002_003"),
+  state = "DC",
+  year = 2023,
+  survey = "acs5",
+  geometry = TRUE
+)
+
+# 2. Convert each year’s crime CSV into sf object
+DC_allcrimes_2020_clean_flat_sf <- st_as_sf(DC_allcrimes_2020_clean_flat,
+  coords = c("longitude", "latitude"), crs = 4326, remove = FALSE) |> 
+  st_transform(st_crs(DC_census_data))
+
+DC_allcrimes_2021_clean_flat_sf <- st_as_sf(DC_allcrimes_2021_clean_flat,
+  coords = c("longitude", "latitude"), crs = 4326, remove = FALSE) |> 
+  st_transform(st_crs(DC_census_data))
+
+DC_allcrimes_2022_clean_flat_sf <- st_as_sf(DC_allcrimes_2022_clean_flat,
+  coords = c("longitude", "latitude"), crs = 4326, remove = FALSE) |> 
+  st_transform(st_crs(DC_census_data))
+
+DC_allcrimes_2023_clean_flat_sf <- st_as_sf(DC_allcrimes_2023_clean_flat,
+  coords = c("longitude", "latitude"), crs = 4326, remove = FALSE) |> 
+  st_transform(st_crs(DC_census_data))
+
+DC_allcrimes_2024_clean_flat_sf <- st_as_sf(DC_allcrimes_2024_clean_flat,
+  coords = c("longitude", "latitude"), crs = 4326, remove = FALSE) |> 
+  st_transform(st_crs(DC_census_data))
+
+# 3. Maps - DC
+
+DC_crimes_2020_red <- ggplot() +
+  geom_sf(data = DC_census_data, color = "grey60", fill = NA, linewidth = 0.2) +
+  geom_sf(data = DC_allcrimes_2020_clean_flat_sf,
+          color = "red", size = 0.3, alpha = 0.1) +
+  labs(title = "2020 Crimes in Washington, D.C.") +
+  theme_bw() +
+  theme(
+    panel.grid = element_blank()   # <- removes grid lines
+  )
+
+DC_crimes_2021_red <- ggplot() +
+  geom_sf(data = DC_census_data, color = "grey60", fill = NA, linewidth = 0.2) +
+  geom_sf(data = DC_allcrimes_2021_clean_flat_sf,
+          color = "red", size = 0.3, alpha = 0.1) +
+  labs(title = "2021 Crimes in Washington, D.C.") +
+  theme_bw() +
+  theme(
+    panel.grid = element_blank()
+  )
+
+DC_crimes_2022_red <- ggplot() +
+  geom_sf(data = DC_census_data, color = "grey60", fill = NA, linewidth = 0.2) +
+  geom_sf(data = DC_allcrimes_2022_clean_flat_sf,
+          color = "red", size = 0.3, alpha = 0.1) +
+  labs(title = "2022 Crimes in Washington, D.C.") +
+  theme_bw() +
+  theme(
+    panel.grid = element_blank()
+  )
+
+DC_crimes_2023_red <- ggplot() +
+  geom_sf(data = DC_census_data, color = "grey60", fill = NA, linewidth = 0.2) +
+  geom_sf(data = DC_allcrimes_2023_clean_flat_sf,
+          color = "red", size = 0.3, alpha = 0.1) +
+  labs(title = "2023 Crimes in Washington, D.C.") +
+  theme_bw() +
+  theme(
+    panel.grid = element_blank()
+  )
+
+DC_crimes_2024_red <- ggplot() +
+  geom_sf(data = DC_census_data, color = "grey60", fill = NA, linewidth = 0.2) +
+  geom_sf(data = DC_allcrimes_2024_clean_flat_sf,
+          color = "red", size = 0.3, alpha = 0.1) +
+  labs(title = "2024 Crimes in Washington, D.C.") +
+  theme_bw() +
+  theme(
+    panel.grid = element_blank()
+  )
+
+print(DC_crimes_2020_red)
+
+# Save all five
+ggsave("DC_crimes_2020_red.png", plot = DC_crimes_2020_red, width = 6, height = 6, dpi = 300)
+ggsave("DC_crimes_2021_red.png", plot = DC_crimes_2021_red, width = 6, height = 6, dpi = 300)
+ggsave("DC_crimes_2022_red.png", plot = DC_crimes_2022_red, width = 6, height = 6, dpi = 300)
+ggsave("DC_crimes_2023_red.png", plot = DC_crimes_2023_red, width = 6, height = 6, dpi = 300)
+ggsave("DC_crimes_2024_red.png", plot = DC_crimes_2024_red, width = 6, height = 6, dpi = 300)
+```
+
+# Figures of City Crime
+
+### Crime Maps (2020-2024)
+Muli-panel figure of crime maps
+Baltimore and DC (2020-2024) in one figure
+```{r}
+# Arrange 10 small maps into a 2×5 grid + single row headers
+library(patchwork)
+library(sf)
+library(ggplot2)
+
+# 1) City-specific extents (so each row shares one bbox)
+balt_bbox <- st_bbox(Balt_census_data)
+dc_bbox   <- st_bbox(DC_census_data)
+
+fix_panel <- function(p, bbox){
+  p +
+    coord_sf(
+      xlim = c(bbox["xmin"], bbox["xmax"]),
+      ylim = c(bbox["ymin"], bbox["ymax"]),
+      expand = FALSE, datum = NA
+    ) +
+    theme_void(base_size = 11) +
+    theme(
+      panel.border = element_rect(color = "grey80", fill = NA, linewidth = 0.5),
+      plot.title = element_blank(),
+      plot.margin = margin(2, 2, 2, 2)
+    )
+}
+
+# Small-map rows (no titles inside)
+balt_row <- wrap_plots(
+  fix_panel(Baltimore_crimes_2020_red, balt_bbox),
+  fix_panel(Baltimore_crimes_2021_red, balt_bbox),
+  fix_panel(Baltimore_crimes_2022_red, balt_bbox),
+  fix_panel(Baltimore_crimes_2023_red, balt_bbox),
+  fix_panel(Baltimore_crimes_2024_red, balt_bbox),
+  nrow = 1
+)
+
+dc_row <- wrap_plots(
+  fix_panel(DC_crimes_2020_red, dc_bbox),
+  fix_panel(DC_crimes_2021_red, dc_bbox),
+  fix_panel(DC_crimes_2022_red, dc_bbox),
+  fix_panel(DC_crimes_2023_red, dc_bbox),
+  fix_panel(DC_crimes_2024_red, dc_bbox),
+  nrow = 1
+)
+
+# 2) Single full-width headers (one for each row)
+title_row <- function(txt, size = 16){
+  ggplot() +
+    annotate("text", x = 0.5, y = 0.5, label = txt,
+             fontface = "bold", size = size/3) +
+    theme_void() +
+    theme(plot.margin = margin(0,0,2,0))
+}
+balt_header <- title_row("Baltimore, MD", size = 18)
+dc_header   <- title_row("Washington, D.C.", size = 18)
+
+# 3) Year labels row
+years_vec <- 2020:2024
+year_row <- wrap_plots(
+  lapply(years_vec, function(y)
+    ggplot() +
+      annotate("text", x = 0.5, y = 0.5, label = y, size = 6) +
+      theme_void()
+  ),
+  nrow = 1
+)
+
+# 4) Stack: header → maps → header → maps → years
+final_grid <- balt_header / balt_row / dc_header / dc_row / year_row +
+  plot_layout(heights = c(0.12, 1, 0.12, 1, 0.15))
+
+final_grid
+
+# 5) Save
+ggsave("crime_maps_2x5.png", plot = final_grid, width = 12, height = 7, dpi = 300)
+```

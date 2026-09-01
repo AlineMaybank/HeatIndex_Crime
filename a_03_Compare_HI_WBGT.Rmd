@@ -1,0 +1,491 @@
+---
+title: "Compare_HI_WBGT"
+author: "Aline Maybank"
+date: "2026-02-09"
+output: html_document
+---
+
+```{r, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Setting Up
+To feel confident with the Heat Index values created by the R packages "weathermetrics" (computed in a_02), which was created by the Bell lab at Yale, I am going to compare these values to the WBGT and Heat Index values calculated by Tsz-Kin.
+
+Load Packages
+```{r, results='hide', message=FALSE, warning=FALSE}
+library(dplyr)
+library(lubridate)
+library(tidyr)
+library(knitr)
+library(kableExtra)
+library(ggplot2)
+library(ncdf4)
+library(stringr)
+library(purrr)
+library(tibble)
+```
+
+# Load data
+
+## Heat Index data 
+
+Calculated the heat index values in the script a_02 using the weathermetrics package that was created by the Bell lab at Yale School of the Environment.
+
+For DC
+```{r}
+daily_hi_DC <- readr::read_csv("outputs/heat_index/daily_hi_DC_f.csv")
+
+summary(daily_hi_DC)             # summary stats
+head(daily_hi_DC, 10)            # first 10 rows
+
+win_start <- as.Date("2021-04-01")
+win_end   <- as.Date("2021-10-31")
+
+daily_hi_DC <- daily_hi_DC |>
+  mutate(city = "DC",            # ensure consistent label
+         date = as.Date(date)) |>
+  filter(date >= win_start, date <= win_end)
+
+```
+
+Below are all from Tsz-Kin:
+
+## A) Heat Index
+```{r}
+# These files were all computed by Tsz-Kin
+heatindex_dir <- "TszKin_Calculations/Heat_Index"
+
+# List all .nc files
+heatindex_files <- list.files(heatindex_dir, pattern = "\\.nc$", full.names = TRUE)
+heatindex_files
+```
+
+## B) WBGT Bernard
+```{r}
+# These files were all computed by Tsz-Kin
+wbgt_dir <- "TszKin_Calculations/wbgt_bernard"
+
+# List all .nc files for DC
+wbgt_files <- list.files(wbgt_dir, pattern = "\\.nc$", full.names = TRUE)
+wbgt_files
+```
+
+## C) WBGT liljegren
+This is like the gold standard for perceived/felt temperature
+```{r}
+# These files were all computed by Tsz-Kin
+wbgt_liljegren_dir <- "TszKin_Calculations/wbgt_liljegren"
+
+# List all .nc files for DC
+wbgt_liljegren_files <- list.files(wbgt_liljegren_dir, pattern = "\\.nc$", full.names = TRUE)
+wbgt_liljegren_files
+```
+
+# Compare Heat Index to A, B, and C
+
+## A) Heat Index - Tzk-Kin Heat Index
+```{r}
+# ==== Read Tsz-Kin Heat Index (.nc) for DC and summarize to daily ====
+
+# Reader robust to 3D/4D arrays, no lon/lat vars needed
+read_hi_tk_month <- function(file_path, city_label = "DC") {
+  nc <- ncdf4::nc_open(file_path); on.exit(ncdf4::nc_close(nc), add = TRUE)
+
+  # Your probe showed a single var named "__xarray_dataarray_variable__"
+  var_name <- if ("__xarray_dataarray_variable__" %in% names(nc$var)) {
+    "__xarray_dataarray_variable__"
+  } else {
+    # fallback: first variable
+    names(nc$var)[1]
+  }
+
+  # Read array; keep singleton dims if package supports it
+  arr <- tryCatch(
+    ncdf4::ncvar_get(nc, var_name, collapse_degen = FALSE),
+    error = function(e) ncdf4::ncvar_get(nc, var_name)
+  )
+
+  vinfo <- nc$var[[var_name]]
+  dim_names_full <- vapply(vinfo$dim, `[[`, "", "name")   # e.g., c("x","y","band","date")
+  dim_lens_full  <- vapply(vinfo$dim, `[[`, 0L,  "len")
+
+  # Map actual array dims -> current dim names (1-length dims may be dropped)
+  dim_names_current <-
+    if (length(dim(arr)) == length(dim_names_full)) dim_names_full else
+    if (length(dim(arr)) == sum(dim_lens_full != 1)) dim_names_full[dim_lens_full != 1] else
+      stop(sprintf("Unexpected dim structure in %s (arr=%s; full=%s; lens=%s)",
+                   basename(file_path),
+                   paste(dim(arr), collapse="x"),
+                   paste(dim_names_full, collapse=","),
+                   paste(dim_lens_full, collapse=",")))
+
+  # Identify time axis ("date" in your probe)
+  t_axis <- which(dim_names_current %in% c("date","time","day","t"))
+  if (length(t_axis) != 1) stop("Could not identify time axis in ", basename(file_path),
+                                " among: ", paste(dim_names_current, collapse=", "))
+
+  # Move time last; flatten space; summarize per day
+  perm <- c(setdiff(seq_along(dim(arr)), t_axis), t_axis)
+  arrp <- aperm(arr, perm)
+  ntime <- dim(arrp)[length(dim(arrp))]
+  mat <- matrix(arrp, ncol = ntime)
+
+  hi_tk_mean_ts <- colMeans(mat, na.rm = TRUE)
+  hi_tk_max_ts  <- apply(mat, 2, max, na.rm = TRUE)
+
+  # Build daily dates from filename “YYYYMM.nc”
+  yymm <- stringr::str_match(basename(file_path), "^(\\d{6})\\.nc$")[,2]
+  if (is.na(yymm)) yymm <- stringr::str_match(basename(file_path), ".*-(\\d{6})\\.nc$")[,2]
+  if (is.na(yymm)) stop("Filename missing YYYYMM: ", basename(file_path))
+  yr  <- as.integer(substr(yymm, 1, 4))
+  mon <- as.integer(substr(yymm, 5, 6))
+  start_date <- as.Date(sprintf("%04d-%02d-01", yr, mon))
+  dates <- start_date + 0:(ntime - 1)
+
+  tibble::tibble(
+    city = city_label,
+    date = dates,
+    hi_tk_mean = as.numeric(hi_tk_mean_ts),
+    hi_tk_max  = as.numeric(hi_tk_max_ts)
+  )
+}
+
+# Read all months and bind
+hi_tk_dc_daily <- purrr::map_dfr(heatindex_files, read_hi_tk_month, city_label = "DC") |>
+  dplyr::arrange(date) |>
+  # (Optional) restrict to the window you care about
+  dplyr::filter(date >= as.Date("2021-04-01"), date <= as.Date("2021-10-31"))
+
+# QA
+glimpse(hi_tk_dc_daily)
+range(hi_tk_dc_daily$date)
+head(hi_tk_dc_daily, 10)
+
+```
+
+Join to your weathermetrics DC series and measure relatedness (correlation)
+No unit conversion needed for comparison
+```{r}
+# Compare: Weathermetrics HI (°F) vs Tsz-Kin HI (units irrelevant for correlation)
+compare_dc_hi <- daily_hi_DC %>%
+  dplyr::select(city, date, hi_mean_f, hi_max_f) %>%
+  dplyr::inner_join(hi_tk_dc_daily, by = c("city","date"))   # overlap only
+
+cmp_max_hi  <- compare_dc_hi |> dplyr::filter(!is.na(hi_max_f),  !is.na(hi_tk_max))
+cmp_mean_hi <- compare_dc_hi |> dplyr::filter(!is.na(hi_mean_f), !is.na(hi_tk_mean))
+
+cat("N (MAX):  ", nrow(cmp_max_hi),  "\n")
+cat("N (MEAN): ", nrow(cmp_mean_hi), "\n")
+
+# Correlations
+cor_max_pearson   <- cor(cmp_max_hi$hi_max_f,   cmp_max_hi$hi_tk_max,   method = "pearson")
+cor_max_spearman  <- cor(cmp_max_hi$hi_max_f,   cmp_max_hi$hi_tk_max,   method = "spearman")
+cor_mean_pearson  <- cor(cmp_mean_hi$hi_mean_f, cmp_mean_hi$hi_tk_mean, method = "pearson")
+cor_mean_spearman <- cor(cmp_mean_hi$hi_mean_f, cmp_mean_hi$hi_tk_mean, method = "spearman")
+
+
+cat("\n--- HI (weathermetrics) vs HI (Tsz-Kin) — DC ---\n")
+cat("Pearson r (MAX):  ", round(cor_max_pearson, 3), "\n")
+cat("Spearman ρ (MAX): ", round(cor_max_spearman, 3), "\n")
+cat("Pearson r (MEAN): ", round(cor_mean_pearson, 3), "\n")
+cat("Spearman ρ (MEAN):", round(cor_mean_spearman, 3), "\n")
+
+# Optional visuals
+ggplot(compare_dc_hi, aes(x = hi_tk_max, y = hi_max_f)) +
+  geom_point(alpha = 0.5) +
+  geom_smooth(method = "lm", se = TRUE) +
+  labs(title = "Tsz-Kin HI vs Weathermetrics HI — Daily MAX (DC)",
+       x = "Tsz-Kin HI", y = "Weathermetrics HI (°F)") +
+  theme_minimal()
+
+ggplot(compare_dc_hi, aes(x = hi_tk_mean, y = hi_mean_f)) +
+  geom_point(alpha = 0.5) +
+  geom_smooth(method = "lm", se = TRUE) +
+  labs(title = "Tsz-Kin HI vs Weathermetrics HI — Daily MEAN (DC)",
+       x = "Tsz-Kin HI", y = "Weathermetrics HI (°F)") +
+  theme_minimal()
+```
+
+
+## B) Heat Index - WBGT Bernard 
+
+Helper function to read and summarize each file
+
+```{r}
+read_wbgt_bernard_month <- function(file_path, city_label = "DC") {
+  nc <- ncdf4::nc_open(file_path)
+  on.exit(ncdf4::nc_close(nc), add = TRUE)
+
+  var_name <- "wbgt"
+
+  # Read with degenerate dims kept if supported; if not, read normally
+  arr <- tryCatch(
+    ncdf4::ncvar_get(nc, var_name, collapse_degen = FALSE),
+    error = function(e) ncdf4::ncvar_get(nc, var_name)
+  )
+
+  vinfo <- nc$var[[var_name]]
+  dim_names_full <- vapply(vinfo$dim, `[[`, "", "name")   # e.g., c("x","y","band","date")
+  dim_lens_full  <- vapply(vinfo$dim, `[[`, 0L,  "len")   # e.g., 198,138,1,30
+
+  # Determine the *current* dim names corresponding to the array we actually have
+  # Case A: collapse_degen = FALSE → array dims match full names
+  # Case B: collapse_degen dropped 1-length dims → use names with len != 1
+  if (length(dim(arr)) == length(dim_names_full)) {
+    dim_names_current <- dim_names_full
+  } else if (length(dim(arr)) == sum(dim_lens_full != 1)) {
+    dim_names_current <- dim_names_full[dim_lens_full != 1]
+  } else {
+    stop(sprintf(
+      "Dim mismatch in %s: array dims = %s; full names = %s; full lens = %s",
+      basename(file_path),
+      paste(dim(arr), collapse = "x"),
+      paste(dim_names_full, collapse = ","),
+      paste(dim_lens_full, collapse = ",")
+    ))
+  }
+
+  # Identify the time axis among current dims (should be "date")
+  t_axis <- which(dim_names_current %in% c("date", "time"))
+  if (length(t_axis) != 1) {
+    stop("Could not uniquely identify time axis among dims [",
+         paste(dim_names_current, collapse = ", "), "] in file: ",
+         basename(file_path))
+  }
+
+  # Move time to last, then flatten spatial dims
+  perm <- c(setdiff(seq_along(dim(arr)), t_axis), t_axis)
+  arrp <- aperm(arr, perm)
+  ntime <- dim(arrp)[length(dim(arrp))]
+  mat <- matrix(arrp, ncol = ntime)  # rows = space, cols = time
+
+  # Spatial summaries per time step
+  wbgt_mean_ts <- colMeans(mat, na.rm = TRUE)
+  wbgt_max_ts  <- apply(mat, 2, max, na.rm = TRUE)
+
+  # Build daily dates from filename "....-YYYYMM.nc"
+  yymm <- stringr::str_match(basename(file_path), ".*-(\\d{6})\\.nc$")[, 2]
+  if (is.na(yymm)) stop("Filename missing YYYYMM pattern: ", basename(file_path))
+  yr  <- as.integer(substr(yymm, 1, 4))
+  mon <- as.integer(substr(yymm, 5, 6))
+  start_date <- as.Date(sprintf("%04d-%02d-01", yr, mon))
+  dates <- start_date + 0:(ntime - 1)
+
+  tibble(
+    city = city_label,
+    date = dates,
+    wbgt_mean = as.numeric(wbgt_mean_ts),
+    wbgt_max  = as.numeric(wbgt_max_ts)
+  )
+}
+```
+
+Apply it and combine
+```{r}
+wbgt_dc_daily <- purrr::map_dfr(wbgt_files, read_wbgt_bernard_month, city_label = "DC") %>%
+  arrange(date)
+
+wbgt_dc_daily <- wbgt_dc_daily |>
+  filter(date >= win_start, date <= win_end)
+
+glimpse(wbgt_dc_daily)
+summary(wbgt_dc_daily$wbgt_max)
+head(wbgt_dc_daily, 10)
+```
+
+Compare WBGT 
+Correlation between Heat Index (°F) and WBGT (°C)
+```{r}
+# (Safety) make sure city labels match
+daily_hi_DC  <- daily_hi_DC  |> dplyr::mutate(city = as.character(city))
+wbgt_dc_daily <- wbgt_dc_daily |> dplyr::mutate(city = as.character(city))
+
+compare_dc <- daily_hi_DC |>
+  dplyr::select(city, date, hi_mean_f, hi_max_f) |>
+  dplyr::left_join(
+    wbgt_dc_daily |> dplyr::select(city, date, wbgt_mean, wbgt_max),
+    by = c("city","date")
+  )
+
+# Keep rows with both values present
+cmp_max  <- compare_dc |> dplyr::filter(!is.na(hi_max_f),  !is.na(wbgt_max))
+cmp_mean <- compare_dc |> dplyr::filter(!is.na(hi_mean_f), !is.na(wbgt_mean))
+
+cat("N (MAX):  ", nrow(cmp_max),  "\n")
+cat("N (MEAN): ", nrow(cmp_mean), "\n")
+
+# ==== Correlations (no unit conversion required) ====
+# Pearson (linear) and Spearman (rank/monotonic)
+cor_max_pearson  <- cor(cmp_max$hi_max_f,   cmp_max$wbgt_max,  method = "pearson")
+cor_max_spearman <- cor(cmp_max$hi_max_f,   cmp_max$wbgt_max,  method = "spearman")
+cor_mean_pearson <- cor(cmp_mean$hi_mean_f, cmp_mean$wbgt_mean, method = "pearson")
+cor_mean_spearman<- cor(cmp_mean$hi_mean_f, cmp_mean$wbgt_mean, method = "spearman")
+
+cat("\n--- Correlation: Daily MAX (HI °F vs WBGT °C) ---\n")
+cat("Pearson r  :", round(cor_max_pearson, 3), "\n")
+cat("Spearman ρ :", round(cor_max_spearman, 3), "\n")
+
+cat("\n--- Correlation: Daily MEAN (HI °F vs WBGT °C) ---\n")
+cat("Pearson r  :", round(cor_mean_pearson, 3), "\n")
+cat("Spearman ρ :", round(cor_mean_spearman, 3), "\n")
+
+# ==== Simple linear models (optional; slope interpretable only with units noted) ====
+lm_max  <- lm(hi_max_f  ~ wbgt_max,  data = cmp_max)
+lm_mean <- lm(hi_mean_f ~ wbgt_mean, data = cmp_mean)
+
+cat("\nR^2 (MAX):  ", round(summary(lm_max)$r.squared, 3), "\n")
+cat("R^2 (MEAN): ", round(summary(lm_mean)$r.squared, 3), "\n")
+
+# ==== Quick visuals (optional) ====
+# Scatter + regression line for MAX
+ggplot(cmp_max, aes(x = wbgt_max, y = hi_max_f)) +
+  geom_point(alpha = 0.5) +
+  geom_smooth(method = "lm", se = TRUE) +
+  labs(title = "Relationship: WBGT (°C) vs Heat Index (°F) — Daily MAX (DC)",
+       x = "WBGT (°C)", y = "Heat Index (°F)") +
+  theme_minimal()
+
+# Scatter + regression line for MEAN
+ggplot(cmp_mean, aes(x = wbgt_mean, y = hi_mean_f)) +
+  geom_point(alpha = 0.5) +
+  geom_smooth(method = "lm", se = TRUE) +
+  labs(title = "Relationship: WBGT (°C) vs Heat Index (°F) — Daily MEAN (DC)",
+       x = "WBGT (°C)", y = "Heat Index (°F)") +
+  theme_minimal()
+```
+
+
+
+## C) Heat Index - WBGT liljegren
+```{r}
+# Read Liljegren WBGT (.nc) for DC and summarize to daily mean/max
+
+read_wbgt_liljegren_month <- function(file_path, city_label = "DC") {
+  nc <- ncdf4::nc_open(file_path); on.exit(ncdf4::nc_close(nc), add = TRUE)
+
+  var_name <- "wbgt"  # confirmed by your probe
+  arr <- tryCatch(ncdf4::ncvar_get(nc, var_name, collapse_degen = FALSE),
+                  error = function(e) ncdf4::ncvar_get(nc, var_name))
+
+  vinfo <- nc$var[[var_name]]
+  dim_names_full <- vapply(vinfo$dim, `[[`, "", "name")   # e.g., "lon","lat","time"
+  dim_lens_full  <- vapply(vinfo$dim, `[[`, 0L,  "len")
+
+  # Map array dims -> current dim names (in case 1-length dims are dropped)
+  dim_names_current <-
+    if (length(dim(arr)) == length(dim_names_full)) dim_names_full else
+    if (length(dim(arr)) == sum(dim_lens_full != 1)) dim_names_full[dim_lens_full != 1] else
+      stop(sprintf("Dim mismatch in %s: arr=%s; full=%s; lens=%s",
+                   basename(file_path),
+                   paste(dim(arr), collapse="x"),
+                   paste(dim_names_full, collapse=","),
+                   paste(dim_lens_full, collapse=",")))
+
+  # Identify time axis ("time" per your probe)
+  t_axis <- which(dim_names_current %in% c("time","date","day","t"))
+  if (length(t_axis) != 1) stop("Could not identify time axis in ", basename(file_path),
+                                " among: ", paste(dim_names_current, collapse=", "))
+
+  # Put time last, flatten space, summarize per day
+  perm <- c(setdiff(seq_along(dim(arr)), t_axis), t_axis)
+  arrp <- aperm(arr, perm)
+  ntime <- dim(arrp)[length(dim(arrp))]
+  mat <- matrix(arrp, ncol = ntime)  # rows = space, cols = time
+
+  wbgt_lil_mean_ts <- colMeans(mat, na.rm = TRUE)
+  wbgt_lil_max_ts  <- apply(mat, 2, max, na.rm = TRUE)
+
+  # Build dates from the time-dimension units (e.g., "days since 2021-04-01 00:00:00")
+  time_dim_name <- dim_names_current[t_axis]
+  t_units <- nc$dim[[time_dim_name]]$units
+  if (is.null(t_units) || !grepl("since", t_units)) {
+    # Fallback to YYYYMM in filename if units missing
+    yymm <- stringr::str_match(basename(file_path), ".*-(\\d{6})\\.nc$")[,2]
+    if (is.na(yymm)) yymm <- stringr::str_match(basename(file_path), "^(\\d{6})\\.nc$")[,2]
+    stopifnot(!is.na(yymm))
+    yr  <- as.integer(substr(yymm, 1, 4)); mon <- as.integer(substr(yymm, 5, 6))
+    dates <- as.Date(sprintf("%04d-%02d-01", yr, mon)) + 0:(ntime - 1)
+  } else {
+    origin_str <- sub(".*since\\s*", "", t_units)
+    origin <- as.POSIXct(origin_str, tz = "UTC")
+    unit_word <- tolower(strsplit(t_units, " +")[[1]][1])
+    mult <- if (grepl("sec", unit_word)) 1 else if (grepl("min", unit_word)) 60 else if (grepl("hour|hr|h", unit_word)) 3600 else 86400
+    tvals <- tryCatch(ncdf4::ncvar_get(nc, time_dim_name), error = function(e) NULL)
+    if (is.null(tvals)) tvals <- 0:(ntime - 1)
+    dates <- as.Date(origin + tvals * mult, tz = "UTC")
+  }
+
+  tibble::tibble(
+    city = city_label,
+    date = dates,
+    wbgt_lil_mean = as.numeric(wbgt_lil_mean_ts),
+    wbgt_lil_max  = as.numeric(wbgt_lil_max_ts)
+  )
+}
+
+# ---- Read all Liljegren files and combine to daily DC series ----
+stopifnot(length(wbgt_liljegren_files) > 0)
+
+wbgt_lil_dc_daily <- purrr::map_dfr(
+  wbgt_liljegren_files,
+  read_wbgt_liljegren_month,
+  city_label = "DC"
+) %>%
+  dplyr::arrange(date) %>%
+  dplyr::filter(date >= as.Date("2021-04-01"), date <= as.Date("2021-10-31"))
+
+# Quick QA
+dplyr::glimpse(wbgt_lil_dc_daily)
+range(wbgt_lil_dc_daily$date)
+head(wbgt_lil_dc_daily, 10)
+summary(wbgt_lil_dc_daily$wbgt_lil_max)
+
+```
+
+Compare with your Heat Index (weathermetrics) — correlation
+No unit conversion needed for correlation (linear scales).
+```{r}
+# Align with your DC weathermetrics series
+compare_dc_lil <- daily_hi_DC %>%
+  dplyr::select(city, date, hi_mean_f, hi_max_f) %>%
+  dplyr::inner_join(wbgt_lil_dc_daily, by = c("city","date"))
+
+cmp_max_lil  <- compare_dc_lil |> dplyr::filter(!is.na(hi_max_f),  !is.na(wbgt_lil_max))
+cmp_mean_lil <- compare_dc_lil |> dplyr::filter(!is.na(hi_mean_f), !is.na(wbgt_lil_mean))
+
+cat("N (MAX):  ", nrow(cmp_max_lil),  "\n")
+cat("N (MEAN): ", nrow(cmp_mean_lil), "\n")
+
+
+# Correlations
+cor_lil_max_pearson   <- cor(cmp_max_lil$hi_max_f,  cmp_max_lil$wbgt_lil_max,  method = "pearson")
+cor_lil_max_spearman  <- cor(cmp_max_lil$hi_max_f,  cmp_max_lil$wbgt_lil_max,  method = "spearman")
+cor_lil_mean_pearson  <- cor(cmp_mean_lil$hi_mean_f, cmp_mean_lil$wbgt_lil_mean, method = "pearson")
+cor_lil_mean_spearman <- cor(cmp_mean_lil$hi_mean_f, cmp_mean_lil$wbgt_lil_mean, method = "spearman")
+
+
+cat("\n--- HI (weathermetrics) vs WBGT (Liljegren) — DC ---\n")
+cat("Pearson r (MAX):  ", round(cor_lil_max_pearson, 3), "\n")
+cat("Spearman ρ (MAX): ", round(cor_lil_max_spearman, 3), "\n")
+cat("Pearson r (MEAN): ", round(cor_lil_mean_pearson, 3), "\n")
+cat("Spearman ρ (MEAN):", round(cor_lil_mean_spearman, 3), "\n")
+
+# Plots
+ggplot(compare_dc_lil, aes(x = wbgt_lil_max, y = hi_max_f)) +
+  geom_point(alpha = 0.5) +
+  geom_smooth(method = "lm", se = TRUE) +
+  labs(
+    title = "WBGT (Liljegren) vs Heat Index (Weathermetrics) — Daily MAX (DC)",
+    x = "WBGT (Liljegren, native units)", y = "Heat Index (°F)"
+  ) + theme_minimal()
+
+ggplot(compare_dc_lil, aes(x = wbgt_lil_mean, y = hi_mean_f)) +
+  geom_point(alpha = 0.5) +
+  geom_smooth(method = "lm", se = TRUE) +
+  labs(
+    title = "WBGT (Liljegren) vs Heat Index (Weathermetrics) — Daily MEAN (DC)",
+    x = "WBGT (Liljegren, native units)", y = "Heat Index (°F)"
+  ) + theme_minimal()
+
+```
